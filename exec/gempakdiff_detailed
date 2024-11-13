@@ -1,0 +1,58 @@
+#!/bin/bash
+
+if [ "$1" == "-v" ]; then
+verbose=YES
+shift 1
+fi
+
+if [[ -z $1 || -z $2 ]]; then
+echo "Script $(basename $0) takes two arguments! Exiting."
+exit 1
+fi
+
+uniq=$(date +%s)_$$
+TMPDIR=$3/$uniq
+mkdir -p $TMPDIR
+
+if [ $? -ne 0 ]; then
+exit 2
+fi
+
+
+f1=$(basename ${1}.dir1)
+f2=$(basename ${2}.dir2)
+cp $1 $TMPDIR/$f1
+cp $2 $TMPDIR/$f2
+
+cd $TMPDIR
+
+for b in $f1 $f2; do
+gdinfo << EOF > gdinfo.out
+  gdfile=$b
+  output=f/${b}.gdinfo
+  GDATTIM=all
+  GLEVEL=all
+  GVCORD=all
+  GFUNC=all
+  l
+  r
+EOF
+done
+
+for b in $f1 $f2; do
+grep -E "^\s*NUM " -B 99999 ${b}.gdinfo | grep -v "GRID FILE: " > ${b}.gdinfo_head
+grep -E "^\s*NUM " -A 99999 ${b}.gdinfo | awk 'NR>1' | awk '{$1="" ; print $0}' | sed 's|^ ||g;s| |_|g' | sort > ${b}.gdinfo_fields
+done
+
+heads=$(sdiff --suppress-common-lines {$f1,$f2}.gdinfo_head | wc -l)
+exactdiff --hidefilenames {$f1,$f2}.gdinfo_fields > $TMPDIR/diff
+addedfields=($(awk '{if ($1==">") print $2}' $TMPDIR/diff))
+removedfields=($(awk '{if ($2=="<") print $1}' $TMPDIR/diff))
+#echo ${removedfields[@]}
+if [ "$verbose" == YES ]; then
+add=$(echo "("${addedfields[@]}")" | sed 's| |;|g;s| |_|g')
+rem=$(echo "("${removedfields[@]}")" | sed 's| |;|g;s| |_|g')
+fi
+echo " +${#addedfields[@]}fields$add -${#removedfields[@]}fields$rem"
+
+#rm -rf $TMPDIR

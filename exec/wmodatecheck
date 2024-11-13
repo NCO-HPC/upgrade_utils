@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+
+import os, re, sys
+
+helptxt = "This script reports invalid dates in WMO file headers.\nUsage: %s /my/directory"%os.path.basename(sys.argv[0])
+
+args = sys.argv[1:]
+assert len(args)==1,"This script takes one and only one argument!\n"+helptxt
+basedir = args[0]
+
+if basedir in ["--help","-h"]:
+ print(helptxt)
+ sys.exit(1)
+
+paths = sorted([os.path.join(dp, f) for dp, dn, filenames in os.walk(basedir) for f in filenames])
+
+days = [str(i).zfill(2) for i in range(1,31+1)]
+hours = [str(i).zfill(2) for i in range(0,23+1)]
+mins = [str(i).zfill(2) for i in range(0,59+1)]
+
+for path in paths:
+ firstbytes = open(path,"rb").read(20)
+ if b"****" not in firstbytes: continue
+ wholefile = open(path,"rb").read()
+ wmoheaders = [d.decode() for d in re.findall(b"\*{4}\d+\*{4}\n(\w+\s+\w+\s+\d+)",wholefile)]
+ for header in wmoheaders:
+  date = re.findall("\d+$",header)[0]
+  dd, hh, mm = [m for m in re.findall("..",date)]
+#
+#  print ("dd=%s hh=%s mm=%s"%(dd,hh,mm))
+#
+  dd_bad = (dd not in days)
+  hh_bad = (hh not in hours)
+  mm_bad = (mm not in mins)
+  if any([dd_bad,hh_bad,mm_bad]):
+   print("%s: invalid date in header <%s>"%(re.sub("^%s/?"%basedir,"",path),header))

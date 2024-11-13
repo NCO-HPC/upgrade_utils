@@ -1,0 +1,47 @@
+#%Module1.0#####################################################################
+##
+## upgrade_utils modulefile
+##
+
+proc ModulesHelp { } {
+    global version prefix
+
+    puts stderr "upgrade_utils\n"
+    puts stderr "This module contains utilities that facilitate WCOSS code package upgrade testing.\n"
+    puts stderr "\tdiffoutputdirs: reports differences between corresponding files in two directories.\n"
+    puts stderr "\tfntranslate: filename translation utility.\n"
+    puts stderr "\ttimeliness: compares file modifications time for two directories.\n"
+    puts stderr "\twmodatecheck: ensure valid dates for files with WMO headers.\n"
+    puts stderr "\tplotruntime: generates plots of runtime logs.\n"
+    puts stderr "Run each of the above commands with --help/-h for usage.\n"
+    puts stderr "This module also contains utilities that help to automate any number of IT checklist tasks"
+    puts stderr "(https://docs.google.com/document/d/1oaWAc9mAyBO_1CypW3abbLGbjNiTwnx3yunsxWI6yQA/edit):"
+    puts stderr "Use ITREADME command to view usage details.\n"
+}
+
+module-whatis   "Puts various package testing utilities in PATH"
+
+set upgrade_utils_ver 0.0.4
+
+set HOMEupgrade_utils /gpfs/dell1/nco/ops/nwtest/upgrade_utils.v${upgrade_utils_ver}
+set system [exec ${HOMEupgrade_utils}/exec/getsystem.pl -t ]
+setenv HOMEupgrade_utils ${HOMEupgrade_utils}
+
+if { $system == "Dell" } {
+module load ips/18.0.5.274
+module load prod_util/1.1.4
+module load bufr_util/1.0.1
+module load gempak/7.3.1
+module load ecflow/4.17.0
+} 
+if { $system == "Cray" } {
+module load gcc/4.9.2
+module load util_shared/1.0.4
+module load gempak/7.3.2
+module load ecflow/intel/4.17.0
+}
+module load grib_util/1.1.0
+module load python/3.6.3
+
+prepend-path    PATH                $env(HOMEupgrade_utils)/exec
+prepend-path    PATH                $env(HOMEupgrade_utils)/ush

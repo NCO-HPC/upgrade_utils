@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+#####
+# itcheck_4
+#####
+# Purpose:
+#
+# IT checklist, Interpreted Code #2: "Are environmental variables only set in
+# the J-job and subsequently exported to child scripts?"
+#
+# This script detects changes to environmental variables. It gets run twice (or
+# more). First, it gets run in with the --before/-1 option to record
+# environmental variables to a temporary file. Then, it is run with using the
+# --after/-2 option at any point later on to detect whether any environmental
+# variables have been changed.
+#
+# Exit status 0 indicates no environment changes detected. Exit status 2
+# indicates environment changes detected.
+#####
+# Usage:
+# ITChecklist_Stage_4_RunInsideTestRun --before ~/my/working/directory/
+# ITChecklist_Stage_4_RunInsideTestRun --after ~/my/working/directory/
+#####
+# Written by Alex Richert (alexander.richert@noaa.gov)
+#
+
+import pickle, os, sys
+
+scriptname = os.path.basename(sys.argv[0])
+assert sys.version_info.major==3, "%s: This script requires Python 3"%scriptname
+assert len(sys.argv)==3, "%s: This script takes two arguments! First argument is --before/-1 or --after/-2, second argument is working directory for storing environment information."%scriptname
+job = os.getenv("job")
+tmpfilename = sys.argv[2]+"/varchangecheck.tmpfile.%s"%job
+
+opt = sys.argv[1]
+assert opt in ["--before","-1","--after","-2"], "Argument '%s' not recognized"%opt
+
+env = dict(os.environ)
+
+assert tmpfilename!="/varchangecheck.tmpfile", "Working dir specification didn't work..."
+
+if opt in ["--before","-1"]:
+ f = open(tmpfilename,"wb")
+ pickle.dump(env, f)
+ f.close()
+ print("Storing environment to %s"%tmpfilename)
+ sys.exit()
+
+print('######################################################')
+print('######################################################')
+print("%s - Stage 4 - Run during code test run"%sys.argv[2])
+print('######################################################')
+print('######################################################')
+
+print("Reading environment from %s"%tmpfilename)
+prevenv = pickle.load(open(tmpfilename, "rb"))
+newkeys = env.keys()
+prevkeys = prevenv.keys()
+uniqkeys = set(newkeys).union(prevkeys)
+allgood = True
+for uniqkey in sorted(uniqkeys):
+ if uniqkey not in prevkeys:
+  print("%s: variable '%s' is not in the previous environment!"%(scriptname, uniqkey)); allgood = False
+ elif uniqkey not in newkeys:
+  print("%s: variable '%s' seems to have become undefined!"%(scriptname, uniqkey)); allgood = False
+ elif env[uniqkey]!=prevenv[uniqkey]:
+  print("%s: variable '%s' has changed in value.\n<Old value>: <%s>\n<New value>: <%s>"%(scriptname, uniqkey, prevenv[uniqkey], env[uniqkey])); allgood = False
+
+sys.exit([2,0][allgood])
+print('######################################################')
+print('######################################################')

@@ -1,0 +1,294 @@
+#!/bin/bash
+#####
+# gribdiff.sh
+#####
+# Purpose: Compares two GRIB2 files using wgrib2. It checks their WMO headers
+# (currently it is not smart enough to know which GRIB message a header is
+# associated with, it compares all the headers found in each file), records
+# (names, with some identifying information about levels, etc.),
+# grid/product/data definitions, and data values (checks to see whether the
+# range of values for a given field overlaps with that of the other file). By
+# default, the script outputs detailed comparisons to the terminal using the
+# 'less' command (meaning that those comparisons can be saved by typing 's',
+# followed by output file name, followed by ENTER). Additionally a summary is
+# saved to ./gribsummary.{uniqidentifier}.txt, where {uniqidentifier} is
+# "$(date +%s).$$", as recorded near the beginning of the script. Exit code 0
+# indicates no differences were found ("VERDICT: SAME"), exit code 2 indicates
+# differences ("VERDICT: DIFFERENT"). Exit code 1 indicates early exit due to
+# Ctrl-c or wrong number of arguments provided. The script can be run
+# non-interactively, and can be told to quit as soon as differences are found
+# (by default, it does all checks even after one has found differences).
+#####
+# Usage:
+# $ gribdiff.sh file1 file2
+##
+# Options:
+# -a/--auto: run script non-interactively (no less-ing of comparisons or ENTER to continue)
+# -q/--quitasap: terminate script as soon as a difference is found. Summary file is not saved.
+##
+# An example where two files are the same:
+# $ gribdiff.sh file1.grib2 file2.grib2
+# >  Comparing file1.grib2 and file2.grib2
+# >  When viewing output, to save to file, press 's' and enter a file name + ENTER.
+# >  
+# >  [1/5] CHECK WMO HEADERS. Press ENTER to proceed.
+# >  No differences in WMO headers detected for files file1.grib2 and file2.grib2 (0 headers in each)
+# >  
+# >  [2/5] CHECK RECORDS. Press ENTER to proceed.
+# >  0 records appear exclusively in file1.grib2 (which has 48 records total)
+# >  0 records appear exclusively in file2.grib2 (which has 48 records total)
+# >  Files file1.grib2 and file2.grib2 have the same records/levels/product template def. numbers
+# >  
+# >  [3/5] CHECK GRID/PRODUCT/DATA DEFINITIONS. Press ENTER to proceed.
+# >  No grid/product/data definition differences found for files file1.grib2 and file2.grib2
+# >  
+# >  [4/5] CHECK GRID. Press ENTER to proceed.
+# >  No grid differences found for files file1.grib2 and file2.grib2
+# >  
+# >  [5/5] CHECK VALUE RANGES. Press ENTER to proceed.
+# >  Value ranges overlap for all corresponding records in files file1.grib2 and file2.grib2
+# >  
+# >  VERDICT: MATCHING
+# >  
+# >  Choose filename to save summary of this comparison (or Ctrl-c to quit; default is ./gribsummary.1578668198.30995.txt): 
+# >  Summary written to 'gribsummary.1578668198.30995.txt'
+# >  Deleting tmp files and exiting...
+##
+# An example where two files are completely different:
+# $ gribdiff.sh --auto file3.grib2 file4.grib2
+# >  Comparing file3.grib2 and file4.grib2
+# >  When viewing output, to save to file, press 's' and enter a file name + ENTER.
+# >  
+# >  [1/5] CHECK WMO HEADERS.
+# >  No differences in WMO headers detected for files file3.grib2 and file4.grib2 (0 headers in each)
+# >  
+# >  [2/5] CHECK RECORDS.
+# >  48 records appear exclusively in file3.grib2 (which has 48 records total)
+# >  43 records appear exclusively in file4.grib2 (which has 43 records total)
+# >  Files file3.grib2 and file4.grib2 do not have the same records
+# >  
+# >  [3/5] CHECK GRID/PRODUCT/DATA DEFINITIONS.
+# >  There are grid/product/data definition differences for files file3.grib2 and file4.grib2
+# >  
+# >  [4/5] CHECK GRID.
+# >  There are grid differences for files file3.grib2 and file4.grib2
+# >  
+# >  [5/5] CHECK VALUE RANGES.
+# >  The ranges for variables in files file3.grib2 and file4.grib2 do not all overlap
+# >  
+# >  VERDICT: DIFFERENT
+# >  
+# >  Summary written to 'gribsummary.1578668331.32125.txt'
+# >  Deleting tmp files and exiting...
+#####
+# Environmental variables:
+#
+# $TMP: used to set directory for temporary files. Defaults to /tmp/.
+#####
+# Written by Alex Richert (alexander.richert@noaa.gov)
+#
+
+function ctrl_c() { rm -f $TMP/[a-Z]*$unique ; echo "Deleting tmp files and exiting..." ; exit ${1:-1} ; }
+trap ctrl_c INT
+
+TMP=${TMP:-/tmp/}
+lessargs="--prompt Press \'q\' to exit and continue grib diffing; scroll with arrow keys/pgup/pgdn"
+
+filenames=()
+for arg in $*; do
+ case $arg in
+  "-a"|"--auto") GRIBDIFFAUTO=YES ;;
+  "-q"|"--quitasap") QUITASAP=YES ;;
+  *) filenames+=($arg)
+ esac
+done
+
+s0=$(basename $0)
+if [ ${#filenames[@]} -ne 2 ] ; then echo "$s0: This script takes exactly two filenames! Exiting..." ; exit 1 ; fi
+for filename in ${filenames[@]}; do if [ ! -f $filename ]; then echo "$s0: File $filename does not exist!" ; nofile=YES ; fi ; done
+if [ "$nofile" == YES ]; then exit 1 ; fi
+
+readmsg="Press ENTER to proceed."
+
+function begincheck() { if [ "$GRIBDIFFAUTO" == YES ]; then echo $1; else read -p "$1 $readmsg"; fi ; }
+function looseheadercheck(){ perl -0777 -nle 'print "$1\n" while m/\*{4}\d+\*{4}\n([^\n\r]*)/gm' $1 | perl -pe "s|\ |:|g" | sort ; }
+function strictheadercheck(){ perl -0777 -nle 'print "$1\n" while m/\*{4}\d+\*{4}\n([[:upper:]]{4}\d{2}\s[[:upper:]]{4}\s\d{6}(\r|\n))/gm' $1 | sort ; }
+#function gribrecords(){ $WGRIB2 $1 -full_name -code_table_4.0 | perl -pe "s|^[^:]*:[^:]*:([^:]*):code\ table\ ([^=]*=\d*).*|\1_\2|g" | sort ; }
+function gribtworecords(){ $WGRIB2 $1 -full_name -pdt | awk '{$1="";$2="";print}' | sort ; }
+function gribdefs(){
+ opts="-full_name -code_table_4.0 -code_table_3.1 -code_table_5.0 -code_table_5.1"
+ $WGRIB2 $1 $opts | \
+ perl -pe 's|^[\d\.]*:[\d\.]*:([^:]*):[^\d]*([\d\.]*=\d*)[^:]*:[^\d]*([\d\.]*=\d*)[^:]*[^\d]*([\d\.]*=\d*)[^:]*[^\d]*([\d\.]*=\d*).*|$1_$2:$3:$4:$5|g' | \
+ sort ; }
+function gribgrids(){
+ $WGRIB2 $1 -full_name -code_table_4.0 -grid | perl -0777 -pe "s|\n(?![\d\.]*:\d*:)||g;s|[\ \t]+|\ |g;s|:\ +|:|g" | \
+ perl -pe 's|^[\d\.]*:\d*:([^:]*):code table ([^=]*=\d*).*?(\(\d* x \d*\)).*?(lat\s[-\d\.]*\sto\s[-\d\.]*)\s(lon\s[-\d\.]*\sto\s[-\d\.]*).*|$1:$2:$3:$4|g;s| to |,|g' | \
+ sort ; }
+function gribstats(){ $WGRIB2 $1 -full_name -code_table_4.0 -min -max | perl -pe "s|^[^:]*:[^:]*:([^:]*):code table ([^=]*=\d*).*?(min=[^:]*:)(max=[^:]*).*|\1_\2:\3\4|g" | sort ;}
+function checkquit(){ if [ "$1" == "DIFFERENT" ]; then echo ; echo "VERDICT: $1"; ctrl_c 2 ; fi ; }
+
+s1=$(basename ${filenames[0]})
+s2=$(basename ${filenames[1]})
+unique=$(echo $(date +%s).$$)
+
+echo "For files ${filenames[0]} and ${filenames[1]}:" > $TMP/SUMMARY.$unique
+space="####################"
+
+echo "Comparing $s1 and $s2"
+echo "When viewing output, to save to file, press 's' and enter a file name + ENTER."
+
+verdict=MATCHING
+echo
+begincheck "[1/5] CHECK WMO HEADERS."
+looseheadercheck ${filenames[0]} > $TMP/looseA.$unique
+looseheadercheck ${filenames[1]} > $TMP/looseB.$unique
+echo ${filenames[0]} ${filenames[1]} > $TMP/loosediff.$unique
+echo "========== ==========" >> $TMP/loosediff.$unique
+sdiff $TMP/looseA.$unique $TMP/looseB.$unique >> $TMP/loosediff.$unique
+if [ $(cat $TMP/loosediff.$unique | wc -l) -gt 2 ]; then
+ echo "The following WMO headers differ:" >> $TMP/SUMMARY.$unique
+ cat $TMP/loosediff.$unique | grep -e "<" -e ">" -e "|" | column -t >> $TMP/SUMMARY.$unique
+ if [ "$GRIBDIFFAUTO" != YES ]; then column -t $TMP/loosediff.$unique | less "$lessargs" ; fi
+ echo "WMO headers differ between $s1 ($(cat $TMP/looseA.$unique | wc -l)) and $s2 ($(cat $TMP/looseB.$unique | wc -l))"
+else
+ echo "No differences in WMO headers detected for files $s1 and $s2 ($(cat $TMP/looseA.$unique | wc -l) headers in each)"
+ echo "No differences in WMO headers detected" >> $TMP/SUMMARY.$unique
+fi
+strictheadercheck ${filenames[0]} > $TMP/strictA.$unique
+strictheadercheck ${filenames[1]} > $TMP/strictB.$unique
+if [ "$(cat $TMP/strictA.$unique | wc -l)" -ne "$(cat $TMP/looseA.$unique | wc -l)" ]; then echo "Improper WMO headers found in file $s1" | tee -a $TMP/SUMMARY.$unique; fi
+if [ "$(cat $TMP/strictB.$unique | wc -l)" -ne "$(cat $TMP/looseB.$unique | wc -l)" ]; then echo "Improper WMO headers found in file $s2" | tee -a $TMP/SUMMARY.$unique; fi
+echo
+begincheck "[2/5] CHECK RECORDS."
+echo ${filenames[0]} ${filenames[1]} > $TMP/records.$unique
+echo "========== ==========" >> $TMP/records.$unique
+gribrecords ${filenames[0]} > $TMP/recordsA.$unique
+gribrecords ${filenames[1]} > $TMP/recordsB.$unique
+sdiff -w 2048 $TMP/recordsA.$unique $TMP/recordsB.$unique | sed 's/|/<\n>/g' >> $TMP/records.$unique
+Aonly=$(grep -c "<" $TMP/records.$unique)
+Bonly=$(grep -c ">" $TMP/records.$unique)
+echo $space >> $TMP/SUMMARY.$unique
+echo "$Aonly records appear exclusively in ${filenames[0]} (which has $(cat $TMP/recordsA.$unique | wc -l) records total)" | tee -a $TMP/SUMMARY.$unique
+echo "$Bonly records appear exclusively in ${filenames[1]} (which has $(cat $TMP/recordsB.$unique | wc -l) records total)" | tee -a $TMP/SUMMARY.$unique
+echo $space >> $TMP/SUMMARY.$unique
+if [ $(grep -c -e "<" -e ">" -e "|" $TMP/records.$unique) -gt 0 ]; then
+ echo "Files $s1 and $s2 do not have the same records"
+ verdict=DIFFERENT
+ if [ "$QUITASAP" == YES ]; then checkquit $verdict; fi
+ if [ "$GRIBDIFFAUTO" != YES ]; then column -t $TMP/records.$unique | less "$lessargs" ; fi
+ echo "The following records differ:" >> $TMP/SUMMARY.$unique
+ cat $TMP/records.$unique | grep -e "<" -e ">" -e "|" | column -t >> $TMP/SUMMARY.$unique
+else
+ echo "Files $s1 and $s2 have the same records/levels/product template def. numbers"
+ echo "Field names+levels+product template def. numbers are the same" >> $TMP/SUMMARY.$unique
+fi
+awk 'NR>2' $TMP/records.$unique | grep -oP "[^\s<>]+" | sort | uniq > $TMP/uniqrecords.$unique
+
+for whichfunc in "gribdefs" "gribgrids"; do
+ echo
+ if [ "$whichfunc" == "gribdefs" ]; then begincheck "[3/5] CHECK GRID/PRODUCT/DATA DEFINITIONS."; fi
+ if [ "$whichfunc" == "gribgrids" ]; then begincheck "[4/5] CHECK GRID."; fi
+ $whichfunc ${filenames[0]} | sed 's/ /:/g' > $TMP/${whichfunc}A.$unique
+ $whichfunc ${filenames[1]} | sed 's/ /:/g' > $TMP/${whichfunc}B.$unique
+ iA=0; iB=0
+ lA=$(cat $TMP/${whichfunc}A.$unique | wc -l)
+ lB=$(cat $TMP/${whichfunc}B.$unique | wc -l)
+ matchpartA=""; matchpartB=""; lastgridA=""; lastgridB=""
+ echo ${filenames[0]} ${filenames[1]} > $TMP/${whichfunc}.$unique
+ echo "========== ==========" >> $TMP/${whichfunc}.$unique
+ while true; do
+  matchpartA=$(echo $lastgridA | grep -oE "^[^:]*:[^:]*")
+  matchpartB=$(echo $lastgridB | grep -oE "^[^:]*:[^:]*")
+  if [ "$matchpartA" == "$matchpartB" ]; then
+   if [ "$lastgridA" != "$lastgridB" ]; then mid="|"; else mid=""; fi
+   echo $lastgridA $mid$lastgridB >> $TMP/${whichfunc}.$unique
+   iA=$(($iA+1)); lastgridA=$(awk "NR==$iA" $TMP/${whichfunc}A.$unique)
+   iB=$(($iB+1)); lastgridB=$(awk "NR==$iB" $TMP/${whichfunc}B.$unique)
+   if [ $iA -ge $lA ] && [ $iB -ge $lB ]; then break; fi
+   continue
+  fi
+  if [[ ( "$matchpartA" > "$matchpartB" || -z "$matchpartA" ) && ! -z "$matchpartB" ]]; then
+   echo ">" "$lastgridB" >> $TMP/${whichfunc}.$unique
+   iB=$(($iB+1)); lastgridB=$(awk "NR==$iB" $TMP/${whichfunc}B.$unique)
+  fi
+  if [[ ( "$matchpartB" > "$matchpartA" || -z "$matchpartB" ) && ! -z "$matchpartA" ]]; then
+   echo "$lastgridA" "<" >> $TMP/${whichfunc}.$unique
+   iA=$(($iA+1)); lastgridA=$(awk "NR==$iA" $TMP/${whichfunc}A.$unique)
+  fi
+  if [ $iA -ge $lA ] && [ $iB -ge $lB ]; then break; fi
+ done
+ echo $space >> $TMP/SUMMARY.$unique
+ if [ $(grep -c -e "<" -e ">" -e "|" $TMP/${whichfunc}.$unique) -gt 0 ]; then
+  verdict=DIFFERENT
+  if [ "$whichfunc" == "gribdefs" ]; then
+   echo "There are grid/product/data definition differences for files $s1 and $s2"
+   echo "For records found in both files, the following differences exist for grid/product/data definitions:" >> $TMP/SUMMARY.$unique
+  fi
+  if [ "$whichfunc" == "gribgrids" ]; then
+   echo "There are grid differences for files $s1 and $s2"
+   echo "For records found in both files, the following differences exist for the grids:" >> $TMP/SUMMARY.$unique
+  fi
+  if [ "$QUITASAP" == YES ]; then checkquit $verdict; fi
+  if [ "$GRIBDIFFAUTO" != YES ]; then cat $TMP/${whichfunc}.$unique | column -t | perl -pe 's/  \|/\| /g' | less "$lessargs" ; fi
+  cat $TMP/${whichfunc}.$unique | column -t | perl -pe 's/  \|/\| /g' | grep -e "|" -e "<" -e ">" >> $TMP/SUMMARY.$unique
+ else
+  if [ "$whichfunc" == "gribdefs" ]; then
+   echo "No grid/product/data definition differences found for files $s1 and $s2"
+   echo "No grid/product/data definition differences" >> $TMP/SUMMARY.$unique
+  fi
+  if [ "$whichfunc" == "gribgrids" ]; then
+   echo "No grid differences found for files $s1 and $s2"; fi
+   echo "No grid differences" >> $TMP/SUMMARY.$unique
+ fi
+done
+echo
+begincheck "[5/5] CHECK VALUE RANGES."
+gribstats ${filenames[0]} > $TMP/valsA.$unique &
+gribstats ${filenames[1]} > $TMP/valsB.$unique &
+wait
+echo "${filenames[0]} = = = = = = ${filenames[1]} = = = = = = =" > $TMP/stats.$unique
+echo "========== = = = = = = ========== = = = = = = =" >> $TMP/stats.$unique
+function valget() {
+ grep -E "^$2:" $1 | perl -pe "s|[:=]| |g"
+}
+while read p; do
+ mapfile -t valsA < <(valget $TMP/valsA.$unique $p) ; mapfile -t valsB < <(valget $TMP/valsB.$unique $p)
+ max=$(echo -e "${#valsA[@]}\n${#valsB[@]}" | sort -n | tail -1)
+ for i in $(seq 0 $(($max-1))); do
+  if [ $i -ge ${#valsA[@]} ]; then
+   echo -n "$s1 - - - - - - " >> $TMP/stats.$unique
+  else
+   echo -n "$s1 ${valsA[$i]}" >> $TMP/stats.$unique
+  fi
+  if [ $i -ge ${#valsB[@]} ]; then
+   echo " $s2 - - - - - -" >> $TMP/stats.$unique
+  else
+   echo " $s2 ${valsB[$i]}" >> $TMP/stats.$unique
+  fi
+ done
+done <$TMP/uniqrecords.$unique
+awk '{if (NR>2) {print $0,(($5>$14)||($12>$7))? (($1==$7)?"MISMATCH":"MISSING"):"OVERLAP"} else {print}}' $TMP/stats.$unique > $TMP/stats_labeled.$unique
+echo $space >> $TMP/SUMMARY.$unique
+if [ $(grep -c -e MISMATCH -e MISSING $TMP/stats_labeled.$unique) -gt 0 ]; then
+ verdict=DIFFERENT
+ echo "The ranges for variables in files $s1 and $s2 do not all overlap"
+ if [ "$QUITASAP" == YES ]; then checkquit $verdict; fi
+ if [ "$GRIBDIFFAUTO" != YES ]; then column -t $TMP/stats_labeled.$unique | less "$lessargs" ; fi
+ echo "The following value ranges do not overlap:" >> $TMP/SUMMARY.$unique
+ grep -e MISMATCH -e MISSING $TMP/stats_labeled.$unique | column -t >> $TMP/SUMMARY.$unique
+else
+ echo "Value ranges overlap for all corresponding records in files $s1 and $s2"
+ echo "Value ranges overlap for all corresponding records" >> $TMP/SUMMARY.$unique
+fi
+echo
+echo "VERDICT: $verdict"
+echo
+if [ "$GRIBDIFFAUTO" != YES ]; then read -p "Choose filename to save summary of this comparison (or Ctrl-c to quit; default is ./gribsummary.${unique}.txt): " summaryfile; fi
+if [ -z $summaryfile ]; then summaryfile=gribsummary.${unique}.txt; fi
+cp $TMP/SUMMARY.$unique $summaryfile
+echo $space >> $summaryfile
+echo "VERDICT: $verdict" >> $summaryfile
+echo "Summary written to '$summaryfile'"
+
+if [ $verdict == DIFFERENT ]; then exitcode=2; else exitcode=0; fi
+ctrl_c $exitcode

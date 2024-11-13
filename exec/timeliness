@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+#####
+# Alerts for each file in second directory (e.g., test, para) that is modified N
+# minutes later than equivalent file in first directory (e.g., prod)
+# Can translate "old" filenames to "new" ones using fntranslate (give fntranslate
+# arguments as additional arguments for timeliness, but without the -f option (or
+# filelist).
+#####
+# Written by Alexander Richert (alexander.richert@noaa.gov)
+# Modified by Arash Bigdeli (arash.bigdeli@noaa.gov)
+#####
+
+import os, re, subprocess, sys
+
+if (not len(sys.argv[1:])>=3) or any([h in sys.argv[1:] for h in ["-h","--help"]]):
+ print("%s: this script requires 3 arguments in the following order: \n reference directory (usually prod; files in the second directory should not be X minutes later than these times), \n test directory (usually para; this is where we are looking for late files), \n and lateness threshold in minutes.\n\nThis script also takes additional optional arguments which become\n arguments for fntranslate (excluding -f option, \n which is taken care of in this script)."%os.path.basename(sys.argv[0]))
+ sys.exit(1)
+
+paths = sys.argv[1:3]
+threshhold_min = sys.argv[3]
+do_fntranslate = False
+if len(sys.argv[1:])>3:
+ do_fntranslate = True
+ fntranslate_args = ["fntranslate"]+sys.argv[4:]+["-f"]
+ assert len(fntranslate_args)>=2, "If you are going to use fntranslate, make sure you give enough arguments!"
+
+mtimes = {0:{},1:{}}
+
+for i in [0,1]:
+ pathlist = [os.path.join(dp, f) for dp, dn, filenames in os.walk(paths[i]) for f in filenames]
+ if do_fntranslate and i==0:
+  oldbasenames = [os.path.basename(path) for path in pathlist]
+  newbasenames = subprocess.check_output(fntranslate_args+oldbasenames).decode().split()
+ for j in range(len(pathlist)):
+  relpath = pathlist[j]
+  relpath = re.sub("^%s/?"%paths[i],"",relpath)
+  newrelpath = relpath
+  if do_fntranslate and i==0:
+   subpath = os.path.split(relpath)[0]
+   newrelpath = subpath+"/"+newbasenames[j]
+  mtimes[i][newrelpath] = os.path.getmtime(paths[i]+"/"+relpath)
+
+masterlist = set(mtimes[0].keys())|set(mtimes[1].keys())
+
+allgood = True
+for relpath in sorted(masterlist):
+ if any([relpath not in keys for keys in [mtimes[0].keys(),mtimes[1].keys()]]):
+#  if not do_fntranslate: print("File %s not found in directory %s"%(relpath,paths[relpath in mtimes[0].keys()]))
+  continue
+ diff_min = (mtimes[1][relpath]-mtimes[0][relpath])/60.0
+ if diff_min>float(threshhold_min):
+  print("File %s was modified %.2f min later"%(relpath,diff_min))
+  allgood = False
+
+if allgood: print("No late files found!")

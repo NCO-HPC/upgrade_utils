@@ -1,0 +1,14 @@
+The first three scripts get run from the root directory of the model of interest (i.e., the directory whose subdirectories are ecf, jobs, sorc, etc.):
+   itcheck_1 > /path/to/outputfile_1
+   itcheck_2 > /path/to/outputfile_2 # you'll probably want to copy/paste the terminal output of this script into a file
+   itcheck_3 > /path/to/outputfile_3
+
+The fourth script gets used inside a test run of a code in ecFlow/LSF; output goes to stdout:
+   # in ecf script:
+   itcheck_4 --before
+   $HOMEmymodel/jobs/JRUNMYMODEL
+   itcheck_4 --after
+The 'after' part can be run as many times as you like if for example you want to check multiple scripts to see whether they are changing variables locally.
+
+The last script in ./exec runs with one argument that specifies the path to a job output file:
+   itcheck_5 /gpfs/dell1/nco/ops/com/output/prod/today/my_model.oXXXXXXXX > /path/to/outputfile_5

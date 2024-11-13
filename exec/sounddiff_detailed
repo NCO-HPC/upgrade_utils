@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+
+import os, re, sys
+
+lineignores = ["and date","Day:","Month:","Year:"]
+
+datamatch = "\d{6}\s+[A-Z0-9]+\s+[^\s]+\s+[^\s]+"
+
+def getline(line):
+ if re.match(datamatch, line) and ("LAT" not in line) and ("LON" not in line): return (" ".join(line.split()[:2])).strip()
+ else: return line.strip()
+
+filenames = sys.argv[1:3]
+lineses = []
+
+for filename in filenames:
+ os.system("debufr -c %s"%filename)
+ lineses += [open("%s.debufr.out"%os.path.basename(filename),"r").readlines()]
+
+assert len(lineses[0])==len(lineses[1]), "The decoded files are not of equal length"
+
+diffcount = 0
+for i in range(len(lineses[0])):
+ lines = [getline(lineses[ifile][i]) for ifile in range(len(filenames))]
+ if re.match("^Found BUFR message #.*", lines[0]): msgnumber = lines[0].split()[4]
+ if "MESSAGE TYPE" in lines[0]:
+  datacount = 0
+  subcount += 1
+ if re.match("^BUFR message #\s+\d+\s+of type .* and date \d+ contains .* subsets", lines[0]): subcount = 0
+ if lines[0][:4]=="BUFR": spec = lines[0]
+ if re.match(datamatch, lines[0]): datacount += 1
+ ignorable = any([lineignore in line for line in lines for lineignore in lineignores])
+ if len(set(lines))>1 and not ignorable: 
+  diffcount += 1
+  print(msgnumber, subcount, datacount)
+
+assert diffcount==0, "There were %s differences"

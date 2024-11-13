@@ -1,0 +1,129 @@
+#!/usr/bin/env python
+
+import argparse
+import sys
+
+class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
+ pass
+parser = argparse.ArgumentParser(description='NetCDF4 differ',formatter_class=CustomFormatter)
+parser.add_argument('filenames',nargs="*",help='NetCDF4 files to diff')
+parser.add_argument('--ignore','-i',nargs='*',default=[],help='Keys to ignore')
+parser.add_argument('--sortgroups','-s',action="store_true",help='Sort groups by name in alphabetical order (root group always comes first)')
+parser.add_argument('--printall','-p',action="store_true",help='Print all info, even if everything matches')
+parser.add_argument('--tol','-t',default=None,type=float, help='Set fractional tolerance for comparing variable means (set to 0.01 for 1%% tolerance; if not provided, no value comparison is done)')
+args = parser.parse_args()
+if args.tol is not None: assert args.tol>-1e-16, "--tol argument cannot be negative!"
+
+import hashlib, os, re, time, warnings
+import netCDF4 as nc
+import numpy as np
+import scipy
+
+def getstdout(cmd):
+ process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+ out, err = process.communicate()
+ try: return out.decode().split("\n")
+ except: return [out]
+
+def getkey(thedict, thekey):
+ try:
+  strval = str(thedict[thekey]).replace("\n",";")
+  if strval.count(" ")>0: return "LONG_%s"%hashlib.md5(strval.encode()).hexdigest()
+  elif len(strval)>60: return "'"+strval[:20]+"'...'"+strval[-15:]+"'"
+  else: return "'"+strval+"'"
+ except KeyError: return "MISSING"
+
+def attrisstr(ncobj,attr): 
+ value = eval("ncobj.%s"%attr) 
+ return type(value) is str 
+
+Files = []
+
+components = ["attributes","dimensions","variables"]
+avgtag = "variable_maxfracdiffs"
+if args.tol is not None: components += [avgtag]
+
+for filename in args.filenames:
+ File = {}
+ rootdata = nc.Dataset(filename,"r")
+ if args.sortgroups: groups = [rootdata]+[item[1] for item in sorted(rootdata.groups.items(),key=lambda item: item[0])]
+ else: groups = [rootdata]+[item[1] for item in rootdata.groups.items()]
+ groupnames = []
+ for group in groups:
+  if group.path=="/": groupname = "rootgroup"
+  else: groupname = group.name
+  groupnames += [groupname]
+  File[groupname] = {}
+  for comp in components: File[groupname][comp] = {}
+  # High-level file attributes (string values):
+  for attr in dir(group):
+   if attr[0]!="_" and attrisstr(group, attr): File[groupname]["attributes"][attr] = eval("group.%s"%attr)
+  #for attr in group.ncattrs(): File[groupname]["attributes"][attr] = group.getncattr(attr) # old way
+  # dimensions (sizes):
+  for dim in group.dimensions: File[groupname]["dimensions"][dim] = group.dimensions[dim].size
+  # variables (data types):
+  for var in group.variables:
+   try: File[groupname]["variables"][var] = group.variables[var].dtype.name
+   except: File[groupname]["variables"][var] = group.variables[var].dtype.__name__
+   if args.tol is not None:
+    File[groupname][avgtag][var] = rootdata.variables[var][...].data
+ # Record record:
+ Files += [File]
+
+allgood = True
+spacer = "\n#### ######## ########\n"
+Runningstring = ""
+numgroups = [len(File.keys()) for File in Files]
+assert set(numgroups), "These files do not have the same number of groups!"
+for i in range(max(numgroups)):
+ Runningstring += spacer
+ thesegroups = [list(f.items())[i][0] for f in Files]
+ for comp in components:
+  Runningstring += spacer+"#"+comp+":"+" "+" ".join(thesegroups)+spacer
+  if comp!=avgtag:
+   uniqkeys = set()
+   for iFile in range(len(Files)):
+    File = Files[iFile]
+    groupname = thesegroups[iFile]
+    for key in File[groupname][comp].keys():
+     uniqkeys.add(key)
+   for uniqkey in sorted(uniqkeys):
+    batch = [getkey(File[groupname][comp], uniqkey) for File in Files]
+    if (len(set(batch))>1 and sum([re.match(ig,uniqkey) is not None for ig in args.ignore])==0) or args.printall:
+     allgood = False
+     Runningstring += uniqkey+": "+" ".join(batch)+"\n"
+  else:
+   for var in sorted(list(set([key for File in Files for key in File[groupname][comp].keys()]))):
+    try:
+     array0 = Files[0][groupname][comp][var]
+     array1 = Files[1][groupname][comp][var]
+    except: continue
+    with warnings.catch_warnings():
+     warnings.simplefilter("ignore",category=RuntimeWarning)
+     maxabsfracdiffs = scipy.nanmax(np.abs((array1-array0)/array0))
+     dummy = scipy.nanmax(array0/array0)
+    if ((maxabsfracdiffs>args.tol) and (sum([re.match(ig,var) is not None for ig in args.ignore])==0)) or args.printall:
+     allgood = False
+     if "float" in array0.dtype.name:
+      a = ("allzero" if np.all(np.abs(array0)<1e-15) else "(%.2f)"%dummy)
+     else: a = array0.dtype.name
+     if "float" in array1.dtype.name:
+      b = ("allzero" if np.all(np.abs(array1)<1e-15) else "%.2f"%(1.0+maxabsfracdiffs))
+     else: a = array1.dtype.name
+     Runningstring += "%s: %s %s"%(var,a,b)+"\n"
+
+if not allgood:
+ prefix = "#File: "+" ".join([os.path.basename(f) for f in args.filenames])
+ Runningstring = prefix+Runningstring
+ uniq = str(time.time())+"_"+str(os.getpid())
+# tmpfile = "/dev/shm/netcdfdiffing_%s"%uniq
+# f = open(tmpfile,"w")
+# f.write(Runningstring)
+# f.close()
+# os.system("column -t %s > %s.fmt"%(tmpfile,tmpfile))
+# with open(tmpfile+".fmt","r") as f:
+#  print(f.read())
+# os.system("rm %s"%tmpfile)
+ print(Runningstring)
+else:
+ print("All good!")

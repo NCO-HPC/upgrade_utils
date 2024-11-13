@@ -1,0 +1,56 @@
+#!/bin/bash
+#####
+# itcheck_1
+#####
+# Purpose:
+#
+# This script wraps the IT checklist items that can both:
+# -run without human intervention (e.g., counting occurrences of words and outputting them), and
+# -be run in a package directory without needing to compile or run the package.
+#
+#####
+# Usage:
+# $ cd /path/to/mycode.v1.2.3 ; itcheck_1 &> myoutput.txt
+#
+# For sample output from each component, see each constituent script.
+######
+# Written by Alex Richert (alexander.richert@noaa.gov)
+#
+
+function run(){
+ script=$1; shift 1
+ rest="$*"
+ echo '#####################################'
+ echo '#####################################'
+ echo "Running script $script - $rest"
+ echo '###'
+ $script
+}
+
+echo '######################################################'
+echo '######################################################'
+echo "$PWD - Stage 1 - Run in package directory before compilation/testing"
+echo '######################################################'
+echo '######################################################'
+
+run item_2.sh "Checklist item #2: Is vertical structure implemented according to NCO standards?"
+run item_3.sh "Checklist item #3: Has the NCO script naming convention been followed?"
+run item_6.sh "Checklist item #6: Are all symlinks contained within the application directory?"
+run item_11.sh "Checklist item #11: Is the prod_util module loaded and used?"
+run item_13.sh "Checklist item #13: Is all code written in C, C++, FORTRAN or Python?"
+run item_17.sh "Checklist item #17: Are scripts written in bash, ksh, perl or python?"
+#export model=$(echo $PWD | perl -pe "s|^.+/||g;s|\.v.*||")
+#run item_20.sh "Checklist item #5: Have standard environment variables been used throughout the entire package?"
+run item_22.sh "Checklist item #22: Are production utilities used for error handling (err_chk, err_exit)?"
+run item_23.sh "Checklist item #23: Are all executables wrapped with production utilities, prep_step (if FORT variables are used for filenames) and startmsg"
+run item_24.sh "Checklist item #24: Are production date utilities used for all date manipulation?"
+run item_27.sh "Checklist item #27: If GRIB utilities are needed, is the grib_util module loaded and used?"
+run item_36.sh "Checklist item #36: Were all pre-built binaries recompiled by a production user?"
+run item_40.sh "Checklist item #40: Is a README file or a release notes doc included to explain the build process?"
+run item_42.sh "Checklist item #42: Did developer use an application modulefile and/or build script to setup environments for building source code?"
+#run item_44.sh "Checklist item #44: Is the frequency of GOTO’s reduced compared to previous version ?"
+run item_45.sh "Checklist item #45: Do C and Fortran source ingest data into dynamically allocated arrays?"
+run item_51.sh "Checklist item #51: Has all background processing been removed?"
+run item_54.sh "Checklist item #54: For unique working directories, is LSF JOBID used to make the working directory unique (using variable '\$jobid'?)"
+run item_56.sh "Checklist item #56: Is execution trace turned on with set-x in shell scripts?"
+run item_57.sh "Checklist item #57: Does each executable redirect stdout and stderr to files (pgmout and errfile, for example), except executables with minimum amount of output (100 lines or so)?"

@@ -1,0 +1,46 @@
+#!/bin/bash
+#####
+# itcheck_2
+#####
+# Purpose:
+#
+# This script wraps the IT checklist items that can both:
+# -require human intervention (i.e., reviewing outputs through 'less'), and
+# -be run in a package directory without needing to compile or run the package.
+#
+#####
+# Usage:
+# $ cd /path/to/mycode.v1.2.3 ; ITChecklist_Stage_2.sh /path/to/mycode.v.1.1.5
+#
+# The argument is optional, and points to an old version of the package against which to diff the current one (for first item in Checklist item checklist).
+# For sample output from each component, see each constituent script.
+######
+# Written by Alex Richert (alexander.richert@noaa.gov)
+#
+
+function run(){
+ echo '#####################################'
+ echo '#####################################'
+ echo "Run script $1? - $2"
+ echo "$3"
+ read -p "Press ENTER to continue, or ctrl-c to quit"
+ echo '###'
+ script=$1 ; shift 3
+ $script $*
+}
+
+echo '######################################################'
+echo '######################################################'
+echo "$PWD - Stage 2 - Run interactively in package directory before compilation/testing"
+echo '######################################################'
+echo '######################################################'
+
+if [ ! -z "$1" ]; then run item_1.sh "Checklist item #1: Did developer start with current production version of code/scripts before making changes?" "This script will present a summary of differences between two version of a code package" $1 $PWD ; else echo "Skipping Application/Coordination #1; to use this check, include a comparison directory as an argument to $0"; fi
+
+run item_18.sh "Checklist item #18: Are dbnet alerts wrapped by check of \$SENDDBN or \$SENDDBN_NTC (and no other variations of the variable SENDDBN)?" "This script will use 'less' to flip through dbnet alerts."
+
+run item_33.sh "Checklist item #33: If the application is syncing data to a remote site using rsync, is a timeout and retry included in the script?" "This script will use 'less' to flip through files containing the word 'rsync'; each instance should be implemented with timeout/retry mechanisms."
+
+#run item_41a.sh "Checklist item #41: Do all code have meaningful document blocks?" "This script will use 'less' to flip through comments for each source file; each file should have informative documentation."
+
+#run item_41b.sh "Checklist item #41: Do all scripts have meaningful document blocks?" "This script will use 'less' to flip through comments for each script file; each file should have informative documentation."

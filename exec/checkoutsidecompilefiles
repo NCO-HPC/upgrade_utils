@@ -1,0 +1,18 @@
+#!/bin/bash
+# Run this script as a wrapper for any build script/make command/etc. It should
+# be run in the same directory (somewhere under 'sorc' directory). Supply the
+# build command with any arguments as arguments, for example, if normally you
+# would compile by running "./build.sh all", then run the following:
+#   checkoutsidecompilefiles ./build.sh all
+# Every time a file is accessed that comes from a "questionable" WCOSS
+# directory, e.g., a user's home directory or an EMC directory, that path will
+# get printed to stdout. No output means a clean compilation. Be warned, due to
+# the strace, this script will make compilation run much longer than usual.
+
+grepmatches="/emc/|/noscrub/^/usrx/local/nceplibs/|^/usrx/local/dev/|/ptmp/|/stmp/"
+grepmatches+="|^/gpfs/hps2|^/gpfs/hps3|^/gpfs/dell2|^/gpfs/dell3|^/gpfs/dell5|^/gpfs/dell6"
+grepmatches+="|"$(echo $(ls /u) | sed 's/[[:space:]]\+/|/g')
+
+execdir=${PWD//\/sorc*/\/exec}
+
+strace -s500 -f -e trace=open $* |& grep -oP '^(\[pid [[:digit:]]+\] )?open\("\K[^"]+' | grep -E "$grepmatches" | grep -vE -e "^$PWD" -e "^$execdir"

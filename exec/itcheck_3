@@ -1,0 +1,36 @@
+#!/bin/bash
+#####
+# itcheck_3
+#####
+# Purpose:
+#
+# This script wraps the IT checklist items that must be run after the
+# code has been compiled.
+#
+#####
+# Usage: no arguments needed
+#
+# For sample output from each component, see each constituent script.
+######
+# Written by Alex Richert (alexander.richert@noaa.gov)
+######
+
+function run(){
+ script=$1; shift 1
+ rest="$*"
+ echo '#####################################'
+ echo '#####################################'
+ echo "Running script $script - $rest"
+ echo '###'
+ $script
+}
+
+echo '######################################################'
+echo '######################################################'
+echo "$PWD - Stage 3 - Run in package directory after compilation"
+echo '######################################################'
+echo '######################################################'
+
+run item_38.sh "Checklist item #38: Does every source directory build only one executable?"
+
+run item_39.sh "Checklist item #39: Do all executables match their top level source directory name?"

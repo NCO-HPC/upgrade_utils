@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+
+import argparse
+epilog = """
+Note on group-by keys:
+This script depends on user-specified BUFR table keys (e.g., 'SAID', 'SIID') whose unique combinations of values are used to group entries together for counting. Special keys that can also be used to group subsets are 'MESSAGE TYPE', 'aggkeys' (an alphabetically ordered comma-delimited list of unique sequence names in a subset, e.g., 'BRITCSTC'), 'naggkeys' (the number of unique sequence names used in a subset), and everything that appears in the section 0-3 header information in the output of 'debufr' (e.g., 'BUFR message #', 'Data category', etc.).
+"""
+class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+ pass
+parser = argparse.ArgumentParser(description='This script compares the subsets of two BUFR files based on user-provided keys',epilog=epilog,formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('filenames',nargs="+",help='Input BUFR filenames')
+parser.add_argument('--groupbykeys','-g',nargs="+",default=["msg_type"],help='Group-by keys for comparing BUFR subsets')
+parser.add_argument('--countrepls','-c',action="store_true",help="Count replications of each key within groups (e.g., 'BRITCSTC'). If False, subsets are counted.")
+parser.add_argument('--repls','-r',action='store_true',help='Work with replications instead of non-replicated subset entries')
+parser.add_argument('--dir','-d',default="./",help='Directory for loading/writing data frame pickles')
+parser.add_argument('--nocache','-n',action="store_true",help='Disable data frame pickling')
+args = parser.parse_args()
+
+import os, sys, re, pickle, hashlib
+from collections import defaultdict
+import ncepbufr
+import pandas as pd
+
+filenames = args.filenames
+groupbykeys = args.groupbykeys
+
+inds = range(len(args.filenames))
+
+mdfs = {}
+sdfs = {}
+rdfs = {}
+aggtables = {}
+
+def getvalue(raw):
+ try:
+  if "." in raw: value = float(raw)
+  else: value = int(raw)
+ except ValueError: value = raw
+ return value
+
+subsettmpfile = "/dev/shm/mysubsettmpfile.%s.txt"%os.getpid()
+
+inheader = False
+inmessageheader = False
+doingrepls = False
+inrepl = False
+
+for ind in inds:
+ md5sum = hashlib.md5(open(filenames[ind],'rb').read()).hexdigest()
+ try:
+  mdfs[ind] = pickle.load(open("%s/%s.messages.pickle"%(args.dir,md5sum),"rb"))
+  sdfs[ind] = pickle.load(open("%s/%s.subsets.pickle"%(args.dir,md5sum),"rb"))
+  if args.repls: rdfs[ind] = pickle.load(open("%s/%s.replications.pickle"%(args.dir,md5sum),"rb"))
+ except: pass
+ if (ind in mdfs.keys()) and (ind in sdfs.keys()) and (ind in rdfs.keys() or not args.repls): continue
+ messages = []
+ subsets = []
+ replsets = []
+ bufr = ncepbufr.open(filenames[ind], 'r')
+ subnumber = 0
+ while bufr.advance() == 0:
+  aggkeys = set()
+  d = {"msg_type": bufr.msg_type, "BUFR message #": bufr.msg_counter, "msg_date": bufr.msg_date}
+  while bufr.load_subset() == 0:
+   subnumber += 1
+   if subnumber%100==0: sys.stderr.write("\r%s"%subnumber); sys.stderr.flush()
+   bufr.dump_subset(subsettmpfile)
+   fp = open(subsettmpfile, 'r')
+   subset = {"subnumber": subnumber}
+   for line in fp:
+    splitline = (re.findall("^(\d{6})\s+(\w*)\s+([^\s]*)", line)+[[0]])[0]
+    if len(splitline)==3:
+     if doingrepls:
+      subset[replkey].add(splitline[1])
+      if inrepl and args.repls: replset[splitline[1]] = getvalue(splitline[2])
+     else: subset[splitline[1]] = getvalue(splitline[2])
+    elif "REPLICATION #" in line and args.repls:
+     if inrepl: replsets += [replset]
+     replset = {"subnumber": subnumber, "replkey": replkey.replace("_repls","")}
+     replnumber = re.findall("\w+\s+REPLICATION\s+#\s+(\d+)", line)[0]
+     replset["replnumber"] = replnumber
+     inrepl = True
+    elif re.match(".*\d*\s*REPLICATIONS.*", line):
+     doingrepls = True
+     inrepl = False
+     replkey = re.findall('\"(.*)\"', line)[0]
+     aggkeys.add(replkey)
+     subset[replkey+"_nrepls"] = int(re.findall("\d+",line)[0])
+     replkey = replkey+"_repls"
+     subset[replkey] = set()
+    elif "END OF SUBSET" in line:
+     doingrepls = False
+     inrepl = False
+     subset[replkey] = ",".join(sorted(list(subset[replkey])))
+     subset["BUFR message #"] = bufr.msg_counter
+     subsets += [subset]
+  if bufr.subsets>0:
+   straggkeys = ",".join(sorted(list(aggkeys)))
+   d["aggkeys"] = straggkeys
+   d["naggkeys"] = len(aggkeys)
+  messages += [d]
+ mdf = pd.DataFrame(messages)
+ sdf = pd.DataFrame(subsets)
+ rdf = pd.DataFrame(replsets)
+ mdfs[ind] = mdf ; sdfs[ind] = sdf ; rdfs[ind] = rdf
+ bufr.close()
+ sys.stderr.write("\r%s\n"%subnumber); sys.stderr.flush()
+ if not args.nocache:
+  pickle.dump(mdf,open("%s/%s.messages.pickle"%(args.dir,md5sum),"wb"))
+  pickle.dump(sdf,open("%s/%s.subsets.pickle"%(args.dir,md5sum),"wb"))
+  if args.repls: pickle.dump(rdf,open("%s/%s.replications.pickle"%(args.dir,md5sum),"wb"))
+
+for ind in inds:
+ basename = os.path.basename(filenames[ind])
+ uname = "File "+str(ind)+": "+basename
+ if not args.countrepls:
+  if not args.repls: aggtables[uname] = sdfs[ind].merge(mdfs[ind],on="BUFR message #").groupby(groupbykeys).size()
+  else: aggtables[uname] = rdfs[ind].merge(sdfs[ind].merge(mdfs[ind],on="BUFR message #")).groupby(groupbykeys).size()
+ else:
+  sumtable = sdfs[ind].merge(mdfs[ind]).groupby(groupbykeys).sum()
+  whichcol = [k for k in sumtable.columns if "_nrepls" in k]
+  aggtables[uname] = sumtable[whichcol]
+
+aggtable = pd.concat(aggtables, axis=1).fillna(0)
+aggtable["Percent diff ((2-1)/1)"] = 100.0*(aggtable.iloc[:,1].astype("float")-aggtable.iloc[:,0])/aggtable.iloc[:,0]
+with pd.option_context('display.max_rows', None): 
+ print(aggtable)
+

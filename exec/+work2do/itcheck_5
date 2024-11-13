@@ -1,0 +1,41 @@
+#!/bin/bash
+#####
+# itcheck_5
+#####
+# Purpose:
+#
+# This script wraps the IT checklist items that examine stdout from a test
+# run in order to perform some checks related to environmental variables.
+#
+#####
+# Usage: requires 1 argument, the path to a stdout file to examine.
+#
+# For sample output from each component, see each constituent script.
+#####
+# Written by Alex Richert (alexander.richert@noaa.gov)
+#####
+
+filetocheck=$1
+
+if [ -z $filetocheck ]; then
+echo "One argument required, the path to the stdout file to examine"
+exit 1
+fi
+
+echo '######################################################'
+echo '######################################################'
+echo "$PWD - Stage 5 - Run on stdout (which must include 'env' output)"
+echo '######################################################'
+echo '######################################################'
+
+function run(){
+ echo '#####################################'
+ echo '#####################################'
+ echo -e "Running script $1\n$2"
+ echo '###'
+ $1 $filetocheck
+}
+
+run items_7_8_9_10.sh "Checklist item #'s 7, 8, 9, 10:\nDoes the com directory structure follow the standard: \$COMROOT/\$NET/\$envir/\$RUN.\$PDY?\nDoes the pcom directory structure follow the standard: \$PCOMROOT/\$envir/\$RUN\nDoes the nwges directory structure follow the standard: \$GESROOT/\$envir/\$RUN.\$PDY or \$GESROOT/\$envir/\$RUN"
+
+#run item_26.sh "Checklist item #26: Will data output directory structure get cleaned up by centralized production cleanup scripts?"

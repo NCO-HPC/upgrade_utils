@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+
+import os, subprocess, sys
+
+printrecords = False
+args = sys.argv[1:]
+if args[0] == "-r":
+  printrecords = True
+  args = args[1:]
+
+WGRIB2 = os.getenv("WGRIB2")
+WGRIB = os.getenv("WGRIB")
+
+def get_wgrib2_records(filename):
+  proc = subprocess.Popen([WGRIB2,filename,"-full_name","-pdt"],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+  stderr = proc.stderr.readlines()
+  if any(["grib1 message ignored (use wgrib)" in l.decode() for l in stderr]):
+    return None
+  readlines = proc.stdout.readlines()
+  lines = [l.decode().strip() for l in readlines]
+  return [":".join(l.split(":")[2:]) for l in lines]
+
+def get_wgrib_records(filename):
+  proc = subprocess.Popen([WGRIB,filename,"-s"],stdout=subprocess.PIPE)
+  readlines = proc.stdout.readlines()
+  lines = [l.decode().strip() for l in readlines]
+  return [":".join(l.split(":")[3:]) for l in lines]
+
+recordsA = get_wgrib2_records(args[0])
+if recordsA: recordsA = set(recordsA)
+else: recordsA = set(get_wgrib_records(args[0]))
+recordsB = get_wgrib2_records(args[1])
+if recordsB: recordsB = set(recordsB)
+else: recordsB = set(get_wgrib_records(args[1]))
+
+added = recordsB-recordsA
+removed = recordsA-recordsB
+
+printA = "" ; printB = ""
+if printrecords:
+  printA = "(%s)"%",".join(list(added))
+  printB = "(%s)"%",".join(list(removed))
+
+print("+%srecords%s -%srecords%s"%(len(added),printA,len(removed),printB))

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+# Variables COMPARA and COMPROD default to ${NET}/${envir}/${RUN}.${PDY} but can be overridden.
+
+echo "Make sure you are running this script from the system where your parallel model is running"
+read -p "Output filename: " outfile
+outfile=${outfile:?}
+read -p "PDY (or press ENTER to use yesterday): " PDY
+PDY=${PDY:-$(date -d "1 day ago" +%Y%m%d)}
+read -p "envir (or press ENTER to use 'para'): " envir
+envir=${envir:-para}
+read -p "RUN: " RUN
+RUN=${RUN:?}
+read -p "NET: " NET
+NET=${NET:?}
+read -p "ecflow top-level family (use '..' or other 'grep -E' expr for cycle): " ecfpath
+ecfpath=${ecfpath:?}
+ecfpath=${ecfpath%/:?}/
+HWMCODEdef=${RUN^^}
+read -p "Project code (default $HWMCODE): " HWMCODE
+HWMCODE=${HWMCODE:-$HWMCODEdef}
+read -p "p3, p35, or to4: " systag
+systag=${systag:?}
+
+COMPARABASE=$(compath.py ${NET}/${envir}/${RUN} 2> /dev/null)
+if [ -z $COMPARABASE ]; then
+read -p "compath.py unsuccessful. Enter COMPARA manually: " COMPARA
+else
+COMPARA=${COMPARABASE}.$PDY
+fi
+
+COMPRODBASE=$(compath.py ${NET}/prod/${RUN} 2> /dev/null)
+if [ -z $COMPRODBASE ]; then
+read -p "compath.py unsuccessful. Enter COMPROD manually: " COMPROD
+else
+COMPROD=${COMPROD}.$PDY
+fi
+
+> $outfile
+if [ ! -f $outfile ]; then echo "FATAL ERROR: Output file '$outfile' could not be accessed."; exit 1; fi
+
+### Job Runtimes
+echo '####################' | tee -a $outfile
+echo "Job Runtimes:" | tee -a $outfile
+grep "$ecfpath" /gpfs/dell1/nco/ops/com/logs/runtime/daily/${PDY}.daily | sort | awk '{print $1,$7}' | tee -a $outfile
+
+### Product Delivery
+echo '####################' | tee -a $outfile
+echo "Product Delivery:" | tee -a $outfile
+timeliness $COMPROD $COMPARA 5 | tee -a $outfile
+
+### High Water Mark Chart
+echo '####################' | tee -a $outfile
+echo 'High Water Mark Chart:' | tee -a $outfile
+plottype=pdf
+tmpdir=/tmp/$(whoami).$$.itdoc/
+mkdir $tmpdir
+hwm_model_binned.py 1 ${HWMCODE}/${systag} --bin=10 --outname=${tmpdir}/${NET}_${RUN}.${plottype} --type=$plottype 2>&1 | tee -a $outfile
+emailaddress=$(whoami)@noaa.gov
+read -p "Email to ${emailaddress}? Y/N: " emailcheck
+if [ "$emailcheck" == Y ]; then
+mailx -s "${NET}_${RUN}.${plottype}" -a ${tmpdir}/${NET}_${RUN}.${plottype} $emailaddress < /dev/null
+fi
+
+### Transfer latency
+echo '####################' | tee -a $outfile
+cmd="find $COMPARA | xargs stat --format='%n %Z %Y' | awk '{print \$1,(\$2-\$3)/60}' | sort -nk2 | tail -1"
+sys=$(getsystem)
+if [ $sys == "Venus" ]; then sys=mars; fi
+if [ $sys == "Mars" ]; then sys=venus; fi
+if [ $sys == "Surge" ]; then sys=luna; fi
+if [ $sys == "Luna" ]; then sys=surge; fi
+largestlatency=$(ssh $sys "$cmd")
+echo "Transfer latency: $largestlatency minutes" | tee -a $outfile

@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+# 2 args: ecftaskpath Ndays
+
+import datetime, os, subprocess, sys
+import numpy as np
+
+ECF_HOST = os.getenv("ECF_HOST")
+ECF_PORT = os.getenv("ECF_PORT")
+assert ECF_HOST and ECF_PORT, "ECF_HOST and ECF_PORT must be set!"
+
+def getstdout(cmd):
+ process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+ out, err = process.communicate()
+ return out.decode().split("\n")
+
+ecfpath = sys.argv[1]
+ndays = int(sys.argv[2])
+
+script = getstdout("timeout 10 ecflow_client --edit_script=%s pre_process"%ecfpath)
+
+
+assert len(script)>1
+
+for line in script:
+ if line.startswith("#PBS -l walltime="):
+  walllimit = line.split('=')[-1]
+  break
+
+times = []
+for i in range(ndays):
+ day_ymd = (datetime.date.today()-datetime.timedelta(days=i)).strftime("%Y%m%d")
+ rawruntimes = getstdout(r"grep -P ^%s\b /lfs/h1/ops/prod/com/logs/runtime/prod/daily/%s.daily"%(ecfpath,day_ymd))
+ for rawruntime in rawruntimes:
+  if rawruntime: times += [float(rawruntime.split()[-1])]
+ws = ["min","mean","max"]
+for w in ws:
+ metric = eval("np.%s(times)"%w)
+ metric_hh = str(int(metric//60)).zfill(2)
+ metric_mm = str(int(metric%60)).zfill(2)
+ print("%s: %s:%s"%(w,metric_hh,metric_mm))
+
+print("walllimit:",walllimit)

@@ -1,0 +1,72 @@
+#!/usr/bin/env python
+
+epilog="""
+Example:
+ fntranslate.py blend.t{cyc}z.{elem}_wmo_{DDD}.{rg}.grib2 grib2.blend.t{cyc}z.awp_{elem}_d{DDD}.{rg} -f blend.t00z.appt_wmo_001.ak.grib2 --printold
+Output:
+ blend.t00z.appt_wmo_001.ak.grib2 -> grib2.blend.t00z.awp_appt_d001.ak
+
+Arguments: '--delete', '--modifyold' and '--modifynew' options look like this:
+ fntranslate (...) --modifyold="b" "B" --modifynew="blend" "blendy" --modifynew="(t\d\dz).grib2" "\\1" --delete="\d{3}abc"
+"""
+import argparse
+class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
+ pass
+parser = argparse.ArgumentParser(description='Translate filenames based on user-provided patterns',epilog=epilog,formatter_class=CustomFormatter)
+parser.add_argument('oldpattern',help="old filename style with elements specified in brackets, with optional ':n' (e.g., '{cycle:3}') to specify exact number of characters to match")
+parser.add_argument('newpattern',help="new filename style with elements specified in curly brackets (e.g., '{cycle}')")
+parser.add_argument('--printold','-p',action='store_true',help="print old filenames alongside new ones. If False, only new names are printed.")
+parser.add_argument('--enforceformat','-e',action='store_true',help="Return error if a file does not match format scheme.")
+parser.add_argument('--oldfilenames','-f',nargs='*',default=[],help="new filename style with elements specified in curly brackets (e.g., '{cycle}')")
+parser.add_argument('--delete','-d',action='append',default=[],help="pattern to delete from output; Python regex-compatible (can be used multiple times)")
+parser.add_argument('--modifyold','-M',action='append',nargs=2,default=[],help="space-separated input-output patterns to modify input; Python regex-compatible (can be used multiple times; see 'Arguments' below)")
+parser.add_argument('--modifynew','-m',action='append',nargs=2,default=[],help="space-separated input-output patterns to modify output; Python regex-compatible (can be used multiple times; see 'Arguments' below)")
+args = parser.parse_args()
+
+import re, sys, os
+
+oldfilenames = args.oldfilenames
+
+assert len(oldfilenames)>0,"%s: We need some filenames here!"%os.path.basename(sys.argv[0])
+if len(oldfilenames)==1 and (" " in oldfilenames): oldfilenames = oldfilenames.split()
+
+for replace in args.modifyold:
+ for i in range(len(oldfilenames)):
+  oldfilenames[i] = re.sub(replace[0],replace[1],oldfilenames[i])
+
+components = list(filter(None,re.split("({[^({|})]*})",args.oldpattern)))
+
+for oldfilename in oldfilenames:
+ skipthis = False
+ varz = {}
+ runningname = oldfilename*1
+ for i in range(len(components)):
+  if components[i][0]!="{": # is not a element
+   fmtcheck = (runningname[:len(components[i])]==components[i])
+   if args.enforceformat: assert fmtcheck, "%s: Format mismatch!"%os.path.basename(sys.argv[0])
+   if not fmtcheck:
+    print(oldfilename)
+    skipthis = True
+    break
+   runningname = runningname[len(components[i]):]
+  else: # is a element
+   comp = re.sub(":\d+","",components[i])
+   lenspec = re.findall(":(\d+)",components[i])
+   if len(lenspec)>0: varz[comp] = runningname[:int(lenspec[0])]
+   else:
+    if i+1>=len(components): varz[comp] = runningname
+    else: varz[comp] = re.split(components[i+1].replace(".","\."),runningname)[0]
+   runningname = runningname[len(varz[comp]):]
+ if skipthis: continue
+ newaslist = list(filter(None,re.split("({[^({|})]*})",args.newpattern)))
+ newfilename = ""
+ for chunk in newaslist:
+  if chunk in varz.keys(): newfilename += varz[chunk]
+  else: newfilename += chunk
+ for delete in args.delete:
+  newfilename = re.sub(delete,"",newfilename)
+ for replace in args.modifynew:
+  newfilename = re.sub(replace[0],replace[1],newfilename)
+ output = newfilename
+ if args.printold: output = oldfilename+" -> "+output
+ print(output)

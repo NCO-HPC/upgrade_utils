@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+
+def argint_type(x):
+ x = int(x)
+ if x <= 0: raise argparse.ArgumentTypeError("Minimum value is 1")
+ return x
+
+import argparse
+epilog = """
+Important environmental variables:\n
+ TMP: This will determine where various temporary files are written
+  (which will be deleted upon completion). Default is /tmp.\n
+
+Output columns:\n
+ 1: Filename. This is the filename used to match files in each directory, i.e.,
+  it will include any modifications made with the --fntranslate/-f/--fnsub/-x
+  commands.\n
+ 2: Timeliness. This is the last modification time of this file in the second
+  directory minus the last modification time of this file in the first 
+  directory. When running with first directory 'prod' and second directory 
+  'para', a positive number will mean that the para version was late. Use 
+  --spreadsheet/-r option to\n
+ 3: Type. Estimated file type.\n
+ 4: Verdict. Will always be 'DIFFERENT' or 'same', or else an error will be
+  reported. The basis for determining the verdict depends on the file type, 
+  with the exception that file size differencing is done for all file types.\n
+ 5: Size difference. This is the percent size difference, relative to the
+  size of the file in the first directory.\n
+ 6+: Extra columns. The number and content of columns depends on file type, but
+  will always be consistent within file types. If you see something with
+  empty parentheses (e.g., '+headers()'), not to fear, this means no
+  differences were found for that sub-check; it is printed this way for
+  consistency across files of that type.
+"""
+typechoices = sorted(['ascii','bufr','grib','data','fits','netcdf','gempak','idx','empty','tar','unknown'])
+class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+ pass
+parser = argparse.ArgumentParser(description='This script examines two directories and summarizes the differences between corresponding files for various weather-related file formats',epilog=epilog,formatter_class=CustomFormatter)
+parser.add_argument('dir1',type=str,help='First directory (usually prod)')
+parser.add_argument('dir2',type=str,help='Second directory (usually para)')
+parser.add_argument('--include','-i',type=str,help='Python regex expression for matching filenames')
+parser.add_argument('--exclude','-e',type=str,help='Python regex expression for excluding filenames')
+parser.add_argument('--filelists','-l',type=str,nargs=2,metavar=('FILELIST1','FILELIST2'),help='Use file lists containing relative paths instead of listing directory contents. Filenames are taken from the first column of each file list; lines commented with \'#\' are ignored.')
+parser.add_argument('--type','-t',action='append',choices=['all']+typechoices,default=['all'],help='Select which file type to compare')
+parser.add_argument('--coercetype','-c',choices=typechoices,default=None,help='Treat all files as given type. Use at your own peril.')
+parser.add_argument('--skiptypes','-x',type=str,help='Comma-delimited list of file types to skip checking for')
+group = parser.add_mutually_exclusive_group()
+group.add_argument('--fntranslate','-f',nargs=2,metavar=("<old pattern>","<new pattern>"),help='Patterns for fntranslate; gets applied to filenames in first directory')
+group.add_argument('--fnsub','-u',nargs=2,metavar=("<old pattern>","<new pattern>"),help='Match/replace patterns for Python regex filename translation; gets applied to filenames in first directory')
+parser.add_argument('--sortbytype','-s',action='store_true',help='Sort files by type, THEN by name')
+parser.add_argument('--skipfirst','-g',type=argint_type,default=None,help='Skip first n files')
+parser.add_argument('--every','-n',type=argint_type,default=1,help='Only check one in every n files')
+parser.add_argument('--skiplargerthanMB','-m',type=float,default=None,metavar='X',help='Skip files larger than X MB')
+parser.add_argument('--warnskip','-w',action='store_true',help='When files are skipped using --skiplargerthanMB option, print a warning to stderr')
+parser.add_argument('--diffonly','-d',action='store_true',help='Only print results for files that are different')
+parser.add_argument('--spreadsheet','-a',action='store_true',help='Spreadsheet-friendly output (header; comma-delimited; no units on size and timeliness)')
+parser.add_argument('--recursive','-r',action='store_true',help='Descend recursively into directories')
+parser.add_argument('--nowarn','-o',action='store_true',help='Suppress warning messages')
+parser.add_argument('--tartranslate',action='store_true',help='Apply filename translation to tarfile contents')
+parser.add_argument('--keepdata','-k',action='store_true',help='Keep temporary files used for various comparisons')
+parser.add_argument('--verbose','-v',action='store_true',help='Show additional information for grib and bufr files (may produce a lot of output, namely, semicolon-delimited record names)')
+parser.add_argument('--exact',action='store_true',help='Perform bit-for-bit file comparisons')
+parser.add_argument('--percthresh','-p',type=float,default=0,help='Percent threshold for declaring two files different by size')
+args = parser.parse_args()
+if args.type!=["all"]: args.type = args.type[1:]
+
+dirs = [args.dir1, args.dir2]
+
+import os, re, socket, subprocess, sys, time
+from collections import defaultdict, Counter
+
+def getstdout(cmd):
+ process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+ out, err = process.communicate()
+ try: return out.decode().split("\n")
+ except: return [out]
+
+def printstdout(msg):
+ sys.stdout.write(msg); sys.stdout.flush()
+
+def printstderr(msg):
+ if not args.nowarn: sys.stderr.write(msg); sys.stderr.flush()
+
+uniq = str(time.time())+"_"+str(os.getpid())
+hostname = socket.getfqdn()
+username = getstdout("whoami")[0].strip()
+TMP = os.getenv("TMP")
+if (hostname[0] in ["d","c"]): 
+ tmpdirbase = "/lfs/h1/nco/stmp/%s/difftmp/"%username
+if TMP is not None:
+ tmpdirbase = "%s/difftmp_%s/"%(TMP,username)
+tmpdir = os.path.normpath(tmpdirbase+"/%s/"%uniq) # tmpdir will get rm'd later on, so, be careful modifying this!
+os.system("mkdir -p %s"%tmpdir)
+if not os.path.exists(tmpdir):
+ printstderr("Directory %s could not be created! Exitting...\n")
+ sys.exit(1)
+
+verbosedelim = ";"
+
+bufrattrs = ["BUFR edition", "Master table", "Originating center", "Originating subcenter", "Data category", "Local subcategory", "Internatl subcategory", "Master table version", "Local table version", "Data are observed?"]
+
+sign = lambda a: "+" if a>=0.0 else "-"
+
+def cleardata(islast):
+ if not args.keepdata:
+  if not os.path.exists(tmpdir): return
+  tmpdirsize_MB = int(getstdout("du -sm %s"%tmpdir)[0].split()[0])
+  if tmpdirsize_MB>2000 or (islast):
+   os.system("rm -rf %s"%tmpdir)
+   if not islast:
+    os.system("mkdir -p %s"%tmpdir)
+
+def gettype(fullpath, fname):
+ # Size
+ if args.skiplargerthanMB is not None:
+  if (os.path.getsize(fullpath)/1e6) > args.skiplargerthanMB:
+   if args.warnskip: printstderr("SKIPPING LARGE FILE: %s\n"%fullpath)
+   return "sizeskip"
+ if os.path.getsize(fullpath)==0: return "empty"
+# if fname.endswith(".nc"): return "netcdf"
+# if fname.endswith(".grb"): return "grib"
+# if fname.endswith(".txt"): return "ascii"
+# if any([fname.endswith(x) for x in [".tar",".gz",".zip"]]): return "data"
+# nguesses = 0
+# for t in ["bufr", "grib", "grib2"]:
+#  if (t in fname) and ("listing" not in fname):
+#   typeguess = t.replace("grib2","grib")
+#   nguesses += 1
+# if (nguesses==1): return typeguess
+ # Head/tail
+ firstbytes = open(fullpath,"rb").read(27)
+ if b"GEMPAK DATA" in firstbytes: return "gempak"
+ lastbytes = getstdout("tail -c 30 %s"%fullpath)[-1]
+ if type(lastbytes) is str: sevens = "7777"
+ else: sevens = b"7777"
+ if (firstbytes.find(b"BUFR")>=0) and (sevens in lastbytes): return "bufr"
+ if (firstbytes.find(b"GRIB")>=0) and (sevens in lastbytes): return "grib"
+ # file command
+ os.system("head -c 200 %s > /dev/shm/%s.filehead"%(fullpath,uniq))
+ os.system("tail -c 100 %s >> /dev/shm/%s.filehead"%(fullpath,uniq))
+ fulltype = getstdout("file -b /dev/shm/%s.filehead"%uniq)[0]
+ os.system("rm -f /dev/shm/%s.filehead"%uniq)
+# fulltype = getstdout("file -b %s"%fullpath)[0]
+ if "ASCII" in fulltype:
+  if fname.endswith(".idx"): return "idx"
+  else: return "ascii"
+ if "FITS" in fulltype: return "fits"
+ if any([fulltype for t in ["tar archive","gzip compressed"]]) and any([fname.endswith(x) for x in [".tar.gz",".tar"]]): return "tar"
+ if any([n in fulltype for n in ["NetCDF","Hierarchical"]]): return "netcdf"
+ # Head/tail (stripping WMO headers)
+ if ("data" in fulltype) and any([t in args.type for t in ["all","data","bufr","grib"]]):
+  if sevens not in lastbytes: return "data"
+  os.system(r"head -c 200KB %s > /dev/shm//%s.raw"%(fullpath,uniq))
+  os.system(r"perl -0777 -pe 's/\*{4}\d+\*{4}\n[[:upper:]]{4}\d{2}\s[[:upper:]]{4}\s\d{6}\r//g;s|\r\n||g' /dev/shm/%s.raw > /dev/shm/%s.wmostrip"%(uniq,uniq))
+  firstbytes = open("/dev/shm/%s.wmostrip"%uniq,"rb").read(20)
+  os.remove("/dev/shm/%s.raw"%uniq)
+  os.remove("/dev/shm/%s.wmostrip"%uniq)
+  if b"BUFR" in firstbytes: return "bufr"
+  if b"GRIB" in firstbytes: return "grib"
+  return "data"
+ return "unknown"
+
+def DoAndPrintComparison(fullpaths, fname, ftype, lenlongestname):
+ mtimes = [os.path.getmtime(fp) for fp in fullpaths]
+ lateness_min = (mtimes[1]-mtimes[0])/60.0
+ timeliness = "%s%.1f%s"%(sign(lateness_min),abs(lateness_min),"" if args.spreadsheet else "min")
+ sizes = [os.path.getsize(fp) for fp in fullpaths]
+ if sizes[0]>0: percsizediff = 100.0*(sizes[1]-sizes[0])/sizes[0]
+ elif sum(sizes)==0: percsizediff = 0.0
+ else: percsizediff = 999
+ sizereport = "%s%s%.1f%%"%("" if args.spreadsheet else "size",sign(percsizediff),abs(percsizediff))
+ if False: pass
+ ###
+ elif args.exact:
+  result = os.system("cmp %s %s &> /dev/null"%(fullpaths[0],fullpaths[1]))
+  verdict = "DIFFERENT" if result else "same"
+  extracolumns = "with_cmp"
+ elif ftype=="unknown":
+  #if not args.nowarn: printstderr("WARNING: unable to determine file type for %s\n"%fname)
+  #return
+  verdict = "unknown"
+  extracolumns = ""
+ elif ftype=="empty":
+  verdict = "same"
+  extracolumns = ""
+ elif ftype=="idx":
+  idxA = [re.sub("^"+"[^:]+:"*2,"",l.strip()) for l in open(fullpaths[0],"r").readlines()]
+  idxB = [re.sub("^"+"[^:]+:"*2,"",l.strip()) for l in open(fullpaths[1],"r").readlines()]
+  uniqtoA = [l.replace(" ","_") for l in idxA if l not in idxB]
+  uniqtoB = [l.replace(" ","_") for l in idxB if l not in idxA]
+  if args.verbose: extracolumns = "+records(%s) -records(%s)"%(verbosedelim.join(uniqtoB),verbosedelim.join(uniqtoA))
+  else: extracolumns = "+%srecords -%srecords"%(len(uniqtoB),len(uniqtoA))
+  verdict = "DIFFERENT" if (len(uniqtoA)+len(uniqtoB))!=0 else "same"
+ elif ftype=="data":
+  #verdict = "same" if os.path.getsize(fullpaths[0])==os.path.getsize(fullpaths[1]) else "DIFFERENT"
+  if abs(percsizediff)>args.percthresh: verdict = "DIFFERENT"
+  else: verdict = "same"
+  extracolumns = ""
+ elif ftype=="tar":
+  filelists = [getstdout("tar tf %s"%fp) for fp in fullpaths]
+  if (args.fntranslate or args.fnsub) and args.tartranslate:
+   dirsandbases = [os.path.split(f) for f in filelists[0]]
+   dirs = [e[0] for e in dirsandbases]
+   bases = [e[1] for e in dirsandbases]
+   if args.fntranslate: newbases = getstdout(r"fntranslate %s %s -f %s"%(args.fntranslate[0],args.fntranslate[1]," ".join(bases)))
+   if args.fnsub: newbases = [re.sub(args.fnsub[0],args.fnsub[1],b) for b in bases]
+   filelists[0] = [os.path.join(dir,base) for dir, base in zip(dirs,newbases)]
+  A = set(filelists[0]) ; B = set(filelists[1])
+  added = B-A
+  removed = A-B
+  verdict = "same" if (len(added)+len(removed)==0) else "DIFFERENT"
+  #extracolumns = "+%sfiles(%s) -%sfiles(%s)"%(len(added),verbosedelim.join(added),len(removed),verbosedelim.join(removed))
+  a = "(%s)"%verbosedelim.join(added) if args.verbose else ""
+  b = "(%s)"%verbosedelim.join(removed) if args.verbose else ""
+  extracolumns = "+%sfiles%s -%sfiles%s"%(len(added),a,len(removed),b)
+ elif ftype == "ascii":
+  difflines = getstdout("sdiff -B -b -s %s %s"%(fullpaths[0],fullpaths[1]))
+  Ndifflines = len(difflines)
+  if (Ndifflines==1) and not difflines[0]: Ndifflines = 0
+  Nlinesfirst = int(getstdout("wc -l %s"%fullpaths[0])[0].split()[0])
+  if Ndifflines == 0: extracolumns = "samelines"
+  else: extracolumns = "%s/%sDIFFERENTlines"%(Ndifflines,Nlinesfirst)
+  files = [open(fp,"r").read().split() for fp in fullpaths]
+  cA = Counter(files[0])
+  cB = Counter(files[1])
+  cs_num = 0
+  for key in set((list(cA.keys())+list(cB.keys()))): cs_num += cA[key]*cB[key]
+  magA = sum([v**2.0 for v in cA.values()])**0.5
+  magB = sum([v**2.0 for v in cB.values()])**0.5
+  if (magA>1e-200) and (magB>1e-200): cs = "%.1f%%"%(100.0*cs_num/(magA*magB))
+  else: cs = "NA"
+  extracolumns += "  %swordsimilarity"%cs
+  verdict = "DIFFERENT" if ("DIFFERENT" in extracolumns) else "same"
+ elif ftype=="fits":
+  fitsdiffoutput = getstdout("fitsdiff %s %s"%(fullpaths[0],fullpaths[1]))
+  uniquekeywords = {"a":[],"b":[]}
+  diffkeywords = []
+  dims = []
+  for iline in range(len(fitsdiffoutput)):
+   l = fitsdiffoutput[iline]
+   extrafind = re.findall("Extra keyword '(\w+)' in ([a,b])",l)
+   if extrafind:
+    uniquekeywords[extrafind[0][1]] += [extrafind[0][0].replace(" ","_")]
+    continue
+   diffvalfind = re.findall("Keyword +([^ ].+[^ ]) +has different values",l)
+   if diffvalfind:
+    diffkeywords += [diffvalfind[0].replace(" ","_")]
+    continue
+   if "Data dimensions differ:" in l:
+    dims = [fitsdiffoutput[iline+1].split(":")[1].strip().replace(" ",""),fitsdiffoutput[iline+2].split(":")[1].strip().replace(" ","")]
+    continue
+  keyword_diff = len(uniquekeywords["a"])+len(uniquekeywords["b"])
+  verdict = "DIFFERENT" if (keyword_diff or diffkeywords or dims) else "same"
+  a = "(%s)"%verbosedelim.join(uniquekeywords["b"]) if args.verbose else ""
+  b = "(%s)"%verbosedelim.join(uniquekeywords["a"]) if args.verbose else ""
+  c = "(%s)"%verbosedelim.join(diffkeywords) if args.verbose else ""
+  d = "DIFFERENT" if dims else "same"
+  e = "("+"_vs_".join(dims)+")" if args.verbose else ""
+  extracolumns = "+%skeywords%s -%skeywords%s %sdiffkeyvalues%s %sdimensions%s"%(len(uniquekeywords["b"]),a,len(uniquekeywords["a"]),b,len(diffkeywords),c,d,e)
+ elif ftype=="grib":
+  wmos = {}
+  basenames = {}
+  for i in [0,1]:
+   basenames[i] = os.path.basename(fullpaths[i])
+   os.system("cp %s /dev/shm/%s.gribcopy.%s.%s"%(fullpaths[i],uniq,i,basenames[i]))
+   wmos[i] = [(b"/".join(sorted(re.findall(b"\*{4}\d{10}\*{4}\n(\w{6}\s+\w{4})\s+\d{6}",m)))).decode().replace(" ","-") for m in re.split(b"7777",open("/dev/shm/%s.gribcopy.%s.%s"%(uniq,i,basenames[i]),"rb").read()) if b"GRIB" in m]
+  extracolumns = getstdout("gribdiff %s /dev/shm/%s.gribcopy.%s.%s /dev/shm/%s.gribcopy.%s.%s %s/grib/"%(["","-r"][args.verbose],uniq,0,basenames[0],uniq,1,basenames[1],tmpdir))[0]
+  #print("gribdiff %s /dev/shm/%s.gribcopy.%s.%s /dev/shm/%s.gribcopy.%s.%s %s/grib/"%(["","-r"][args.verbose],uniq,0,basenames[0],uniq,1,basenames[1],tmpdir))
+  os.system("rm -f /dev/shm/%s.gribcopy.{0,1}.*"%uniq)
+  isdiff_records = (len(re.findall("[\+-]0records",extracolumns))!=2)
+  if ("".join(wmos[0]) and "".join(wmos[1])):
+   for val in 1*wmos[0]:
+    if val in wmos[1]:
+     wmos[0].remove(val)
+     wmos[1].remove(val)
+   for val in 1*wmos[1]:
+    if val in wmos[0]:
+     wmos[0].remove(val)
+     wmos[1].remove(val)
+  else:
+   wmos[0] = [] ; wmos[1] = []
+  for i in [0,1]: wmos[i] = [w for w in wmos[i] if w]
+  extracolumns += " +%swmoheaders%s -%swmoheaders%s"%(len(wmos[1]),["","(%s)"%verbosedelim.join(wmos[1])][args.verbose],len(wmos[0]),["","(%s)"%verbosedelim.join(wmos[0])][args.verbose])
+  isdiff_wmo = (len(wmos[0])!=len(wmos[1]))
+  verdict = "DIFFERENT" if any([isdiff_records,isdiff_wmo]) else "same"
+ elif ftype=="gempak":
+  extracolumns = getstdout("gempakdiff_detailed %s %s %s %s/gempak/"%(["","-v"][args.verbose],fullpaths[0],fullpaths[1],tmpdir))[0]
+  verdict = "same" if all([f in extracolumns for f in [" +0fields"," -0fields"]]) else "DIFFERENT"
+ elif ftype=="bufr":
+  bufrinfo = {}
+  bufrattrsets = [defaultdict(list) for i in [0,1]]
+  for i in [0,1]:
+   os.system("mkdir -p %s/bufr/"%tmpdir)
+   tmpfilepath = "%s/bufr/%s.%s.bufrdiff%s"%(tmpdir,uniq,fname,i)
+   #HMU Updated 3/15/23 remove oncray variable doesn't exist
+   #debufrcmd = "$DEBUFR" if oncray else "debufr"
+   debufrcmd = "$DEBUFR"
+   os.system("%s -b %s -o %s"%(debufrcmd,fullpaths[i],tmpfilepath))
+   bufrlines = [l.strip() for l in open(tmpfilepath,"r").readlines()]
+   bufrinfo[i] = {}
+   for line in bufrlines:
+    if "Error while reading BUFR file" in line: printstderr("ERROR: Failed to read %s\n"%fullpaths[i]); return
+    endmatches = re.findall("^Reached end of BUFR file; it contained a total of\s+(\d+)\s+messages and\s+(\d+)\s+subsets\s*$",line)
+    if len(endmatches)==1: bufrinfo[i]["Nmessages"], bufrinfo[i]["Nsubsets"] = [int(m) for m in endmatches[0]]
+    for attr in bufrattrs:
+     if re.match("^\s*%s:"%attr,line): bufrattrsets[i][attr] += [line.split()[-1]]
+    if re.match("^\s*\d+:",line): bufrattrsets[i]["descriptors"] += [line.split()[-1]]
+   if not args.keepdata: os.system("rm -f %s"%tmpfilepath)
+  added_attrs = [] ; removed_attrs = [] ; diff_attrs = []
+  for key in set(list(bufrattrsets[0].keys())+list(bufrattrsets[1].keys())):
+   if   key not in bufrattrsets[0].keys(): added_attrs += [key]
+   elif key not in bufrattrsets[1].keys(): removed_attrs += [key]
+   elif not set(bufrattrsets[0][key])==set(bufrattrsets[1][key]): diff_attrs += [key]
+  extracolumns = ""
+  message_diff = bufrinfo[1]["Nmessages"]-bufrinfo[0]["Nmessages"]
+  extracolumns += "%s%smessages  "%(sign(message_diff),message_diff)
+  subset_diff = bufrinfo[1]["Nsubsets"]-bufrinfo[0]["Nsubsets"]
+  extracolumns += "%s%ssubsets  "%(sign(subset_diff),subset_diff)
+  a = ["","(%s)"%(verbosedelim.join(added_attrs))][args.verbose].replace(" ","_")
+  b = ["","(%s)"%(verbosedelim.join(removed_attrs))][args.verbose].replace(" ","_")
+  c = ["","(%s)"%(verbosedelim.join(diff_attrs))][args.verbose].replace(" ","_")
+  extracolumns += "+%sattributes%s -%sattributes%s %sdifferentattributes%s"%(len(added_attrs),a,len(removed_attrs),b,len(diff_attrs),c)
+  verdict = "DIFFERENT" if any([message_diff,subset_diff,diff_attrs]) else "same"
+ elif ftype=="netcdf":
+  ncdiffrawlines = getstdout("ncdiff_detailed %s %s"%(fullpaths[0],fullpaths[1]))[1:]
+  added = defaultdict(list) ; removed = defaultdict(list)
+  for line in ncdiffrawlines:
+   s = line.split()
+   if not line: continue
+   if line.startswith("###"): continue
+   if s[0] in ["#attributes:","#dimensions:","#variables:"]: comp = line.split()[0][1:-1]
+   elif line.startswith("#"): continue
+   if s[1]=="MISSING": added[comp] += [s[0].strip(":")]
+   if s[2]=="MISSING": removed[comp] += [s[0].strip(":")]
+  extracolumns = ""
+  isdiff = False
+  for comp in ["attributes","dimensions","variables"]:
+   a = "(%s)"%verbosedelim.join(added[comp]) if args.verbose else ""
+   b = "(%s)"%verbosedelim.join(removed[comp]) if args.verbose else ""
+   extracolumns += "+%s%s%s -%s%s%s  "%(len(added[comp]),comp,a,len(removed[comp]),comp,b)
+   isdiff += (len(added[comp])+len(removed[comp]))
+  verdict = "DIFFERENT" if isdiff else "same"
+ ###
+ if abs(percsizediff)>args.percthresh: verdict = "DIFFERENT"
+ fspaces = (lenlongestname+2-len(fname))*" "
+ tspaces = max(((7-len(ftype)),1))*" "
+ timespaces = "  "
+ sspaces = "  "
+ try: vspaces = (11-len(verdict))*" "
+ except: printstderr("ERROR: no verdict for %s (%s)"%(",".join(fullpaths),ftype))
+ if args.spreadsheet: fspaces, vspaces, tspaces, timespaces, sspaces = ",",",",",",",",","
+ if (not args.diffonly) or (verdict == "DIFFERENT"):
+  printstdout(("%s%s%s%s%s%s%s%s%s%s%s"%(fname,fspaces,timeliness,timespaces,ftype,tspaces,verdict,vspaces,sizereport,sspaces,extracolumns)).strip()+"\n")
+
+if (not args.nowarn) and (args.keepdata): printstderr("tmpdir: %s\n"%tmpdir)
+
+FileLists = {0: {}, 1: {}}
+#start = time.time()
+lenlongestname = 0
+cnt = 0
+for idir in [0,1]:
+ if args.filelists: DirListing = [l.split()[0] for l in open(args.filelists[idir]).readlines() if not re.match("^\s*#",l)]
+ else:
+  if args.recursive: DirListing = sorted([re.sub("^%s/?"%dirs[idir],"",os.path.join(dp, f)) for dp, dn, filenames in os.walk(dirs[idir]) for f in filenames])
+  else: DirListing = sorted(os.listdir(dirs[idir]))
+ if args.every!=1:
+  if idir==0: DirListing = DirListing[::args.every]
+  if idir==1: DirListing = [f for f in DirListing if f in FileLists[0].keys()]
+ if (args.fntranslate) and (idir==0):
+  pseudonyms = getstdout(r"fntranslate %s %s -f %s"%(args.fntranslate[0],args.fntranslate[1]," ".join([os.path.basename(d) for d in DirListing])))
+ elif (args.fnsub) and (idir==0):
+  pseudonyms = [re.sub(args.fnsub[0],args.fnsub[1],os.path.basename(fn)) for fn in DirListing]
+ else: pseudonyms = DirListing
+ if args.recursive:
+  if ((args.fntranslate is not None) or (args.fnsub is not None)) and (idir==0):
+   for i in range(len(DirListing)):
+    pseudonyms[i] = os.path.join(re.sub("^%s"%dirs[idir],"",os.path.split(DirListing[i])[0]),pseudonyms[i])
+ for iname in range(len(DirListing)):
+  fname = DirListing[iname]
+  if args.include is not None:
+   if not re.match(args.include,fname): continue
+  if args.exclude is not None:
+   if re.match(args.exclude,fname): continue
+  fullpath = os.path.join(dirs[idir], fname)
+  if os.path.isfile(fullpath):
+   pseudonym = pseudonyms[iname]
+   if (args.exact and args.type==["all"]): thetype = "file"
+   else: thetype = gettype(fullpath, fname)
+   if (thetype not in args.type) and ('all' not in args.type): continue
+#   if args.progress: printstderr("%s\r"%cnt) ; cnt += 1
+   FileLists[idir][pseudonym] = {}
+   if args.coercetype is None: FileLists[idir][pseudonym]["type"] = thetype
+   else: FileLists[idir][pseudonym]["type"] = args.coercetype
+   FileLists[idir][pseudonym]["fullpath"] = fullpath
+   if len(pseudonym)>lenlongestname: lenlongestname = len(pseudonym)
+#if args.progress: printstderr("\n")
+#print(time.time()-start)
+
+uniqnames = set([p for idir in [0,1] for p in FileLists[idir].keys()])
+
+if args.sortbytype:
+ uniqtypes = []
+ for uniqname in uniqnames:
+  for i in [0,1]:
+   if uniqname in FileLists[i].keys():
+    uniqtypes += [FileLists[i][uniqname]["type"]]
+    break
+ sorton = [uniqtype+":"+uniqname for uniqtype in uniqtypes]
+ uniqnames = [x for _,x in sorted(zip(sorton,uniqnames))]
+else: uniqnames = sorted(uniqnames)
+
+stride = 1 if 'all' in args.type else args.every
+if args.spreadsheet:
+ printstdout("filename,minuteslater,filetype,verdict,sizediff,extrainfo\n")
+
+if args.skipfirst is not None:
+ uniqnames = uniqnames[args.skipfirst:]
+for uniqname in uniqnames[::stride]:
+ cleardata(False)
+ skipthis = False
+ for idir in [0,1]:
+  if uniqname not in FileLists[idir].keys():
+   printstderr("WARNING: %s only found in %s\n"%(uniqname, dirs[not idir]))
+   skipthis = True
+ if skipthis: continue
+ types = [FileLists[idir][uniqname]["type"] for idir in [0,1]]
+ if "sizeskip" in types: continue
+ fullpaths = [FileLists[idir][uniqname]["fullpath"] for idir in [0,1]]
+ if len(set(types))>1:
+  printstderr("WARNING: %s DIFFERENT types between directories (%s vs. %s)\n"%(uniqname,types[0],types[1]))
+  continue
+ if args.skiptypes is not None:
+  if types[0] in args.skiptypes.split(","): continue
+ DoAndPrintComparison(fullpaths, uniqname, types[0], lenlongestname)
+
+cleardata(True)
+if not args.keepdata:
+ os.system("rmdir --ignore-fail-on-non-empty %s"%tmpdirbase)

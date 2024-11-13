@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+# copied and pasted from arichert-spa-devel Vlab git repo 23 Jan 2020
+#
+# plotruntime
+#
+# For script purpose and usage information, see the text under the argument parsing code below,
+# or run plotruntime.py --help
+#
+# Requirements:
+# -python
+# -pandas
+# -matplotlib
+# -seaborn
+# -numpy
+# -scipy
+# Optional:
+# -cycler
+
+import argparse, os, sys
+
+class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+ pass
+parser = argparse.ArgumentParser(description='This script makes several kinds of plots of run times data from daily runtime logs. Plotting uses matplotlib; can go straight to files or they can be GUI interactive.',formatter_class=CustomFormatter)
+parser.add_argument('taskpaths',nargs='*',help='Specify absolute ecFlow task paths (or base names only, i.e., without full paths, if using --nodebase) to be plotted')
+
+open_group = parser.add_argument_group('Opening and filtering daily log files')###
+open_group.add_argument('--indir','-i',default="/lfs/h1/ops/prod/com/logs/runtime/prod/daily/",help='Directory containing daily runtime log files')
+open_group.add_argument('--daysagostart','-n',default=30,type=int,help='Number of days back to start looking')
+open_group.add_argument('--daysagostop','-m',default=0,type=int,help='Number of days back to stop looking')
+open_group.add_argument('--nodebase','-b',action='store_true',help="Only use node base name in specifying ecFlow tasks, as opposed to absolute node path")
+open_group.add_argument('--suite','-e',action='append',default=[],help='ecFlow suite to include (can be used multiple times)')
+open_group.add_argument('--loosegrep','-l',action='store_true',help="Disable exact matching of node paths")
+open_group.add_argument('--fakegrep','-k',help="File to be read instead of grepping (for manual filtering of logs); all ecFlow tasks will be included in plotting.")
+
+data_group = parser.add_argument_group('Data manipulation')###
+data_group.add_argument('--combine','-c',action='store_true',help="Combine models into single model with name of first given model.")
+data_group.add_argument('--nameoverrides','-y',help='Colon-delimited list of names to replace original ones, following same order as \'taskpaths\'.')
+
+plot_group = parser.add_argument_group('Plot parameters')###
+#AB debug
+#plot_group.add_argument('--plottype','-t',default="interactive", choices=["pdf","png","interactive"], help="Plot type: one of 'png', 'pdf', or 'interactive'")
+#
+plot_group.add_argument('--plottype','-t',default="pdf", choices=["pdf","png","interactive"], help="Plot type: one of 'png', 'pdf', or 'interactive'")
+plot_group.add_argument('--outdir','-p',default="./",help='Specify output directory')
+plot_group.add_argument('--outfilebase','-o',help='Specify output filename (without extension)')
+plot_group.add_argument('--stats','-s',action='store_true',help="Print various statistics on the plots")
+plot_group.add_argument('--dists','-d',action='store_true',help="Create histogram and violin plots")
+plot_group.add_argument('--binfreq','-q',default=None,help='Specify temporal bin frequency using Pandas offset alias (https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases)')
+plot_group.add_argument('--avgtype','-a',default="mean",choices=["mean","median"],help='Specify average type for statistics and binning (median implies 1.4826*MAD instead of std. dev.)')
+plot_group.add_argument('--figsize','-f',default="6.25,4.25",help='Figure width,height in inches; colon-delimited list sets dimensions for each figure')
+plot_group.add_argument('--fontsize','-x',default=12,type=int,help='Font size for plots, where title size=font size+1')
+plot_group.add_argument('--hidegrid','-g',action='store_true',help="Hide plot grid")
+plot_group.add_argument('--shortenpaths','-r',action='store_true',help="Hide plot grid")
+plot_group.add_argument('--gotozero','-z',action='store_true',help="Make time series y-axis goes down to zero")
+plot_group.add_argument('--plotsteps','-j',action='store_true',help="Plot time series as steps")
+plot_group.add_argument('--mintime',default=-1.0,type=float,help="Filter out runtimes below this value")
+plot_group.add_argument('--maxtime',default=None,type=float,help="Filter out runtimes above this value")
+
+
+## When reading this script, keep in mind that any variable that begins with 'args.' came from the following line,
+##  i.e., from command line argument parsing:
+args = parser.parse_args()
+scriptname = os.path.basename(sys.argv[0])
+if (args.outfilebase is not None) and (os.path.basename(args.outfilebase)!=args.outfilebase):
+ sys.stderr.write("%s: Unlawful output file basename. If you want to set the output directory, use --outdir/-d."%scriptname)
+ sys.stderr.flush()
+ sys.exit(1)
+
+import re, itertools, time
+from datetime import datetime, timedelta
+import pandas as pd
+from pandas.plotting import register_matplotlib_converters
+register_matplotlib_converters()
+import numpy as np
+if args.plottype!="interactive":
+ from matplotlib import use
+ if args.plottype=="pdf": use("pdf")
+ elif args.plottype=="png": use("agg")
+from matplotlib import rcParams
+try:
+ import seaborn as sns
+ if args.hidegrid: sns.set_style("white")
+ else:
+  sns.set_style("darkgrid")
+  sns.set_style("darkgrid", {"axes.facecolor": "0.95"})
+except: pass
+rcParams['font.size'] = args.fontsize
+rcParams['axes.edgecolor'] = "0.8"
+textcolor = "0.0"
+rcParams['xtick.color'] = textcolor
+rcParams['ytick.color'] = textcolor
+rcParams['text.color'] = textcolor
+rcParams['axes.labelcolor'] = textcolor
+rcParams['font.family'] = 'sans-serif'
+rcParams['font.sans-serif'] = ['FreeSans']
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+try: from cycler import cycler
+except: pass
+import subprocess
+from io import StringIO
+
+if args.avgtype=="median":
+ def mad(vec):
+  return np.median(np.abs(vec-np.median(vec)))
+
+nicename = {
+"nodepath": "ecFlow node path",
+"activedatetime": "'active' date",
+"walltime_min": "Wall time (minutes)",
+}
+
+madfac = 1.4826
+if args.fakegrep is None:
+ ###
+ ## Make a list of log files that we would *like*, figure out which ones exist, and grep them for the user-provided node names:
+ matchlist = [args.indir+"/"+(datetime.utcnow()-timedelta(days=i)).strftime("%Y%m%d")+".daily" for i in range(args.daysagostop,args.daysagostart+1)]
+ filelist = sorted([f for f in matchlist if os.path.exists(f)])
+ if len(filelist)==0 or len(args.taskpaths)==0:
+  print("No files found.")
+  sys.exit(1)
+ # The following 'grep...' variables control the nature of the grep
+ # (whether to do exact matching, whether to search only for task names as opposed to paths):
+ if args.nodebase: grepinsert = "[^[:space:]]+"
+ else: grepinsert = ""
+ if args.loosegrep:
+  greplinebegin = "" ; greplineend = ""
+ else:
+  greplinebegin = "^" ; greplineend = "[[:space:]]"
+ grepcmd = 'grep -E --no-filename '+' '.join(['-e '+greplinebegin+grepinsert+nodepath+greplineend for nodepath in args.taskpaths])+' '+' '.join(filelist)
+ resultstr = subprocess.run(grepcmd.split(), stdout=subprocess.PIPE).stdout.decode("utf-8")
+ if len(resultstr)==0:
+  sys.stderr.write("Nothing found in grep :(\n"); sys.stderr.flush()
+  sys.exit(1)
+ grepresult = StringIO(resultstr)
+else:
+ grepresult = args.fakegrep
+
+###
+## Read the grep results (i.e., filtered daily runtime logs) into a Pandas dataframe:
+columnnames = ["nodepath","activedate","activetime","completedate","completetime","submittedtoactive_sec","walltime_min"]
+df = pd.read_csv(grepresult, delimiter='\s+', header=None, names=columnnames)
+df["activedatetime"] = pd.to_datetime(df["activedate"].astype("str")+" "+df["activetime"],format="%Y%m%d %H:%M")
+df["nodebase"] = df["nodepath"].apply(os.path.basename)
+df["suite"] = df["nodepath"].apply(lambda x: re.findall("^/\w+/?",x)[0].replace("/",""))
+if len(args.suite)>0: df = df[df["suite"].isin(args.suite)]
+which = "nodebase" if args.nodebase else "nodepath"
+if args.combine:
+ if args.nameoverrides is None:
+  name = ":".join(list(df[which].unique()))
+  df[which] = name
+ else: df[which] = args.nameoverrides.split(":")[0]
+else:
+ if args.nameoverrides is not None:
+  overridenames = args.nameoverrides.split(":")
+  if len(overridenames) != len(args.taskpaths):
+   sys.stderr.write("Wrong number of override names; they should correspond with 'taskpaths'"); sys.stderr.flush()
+   sys.exit(1)
+  for i in range(len(args.taskpaths)):
+   df[which][df[which]==args.taskpaths[i]] = overridenames[i]
+
+xvar = "activedatetime" ; yvar = "walltime_min"
+if args.nodebase and args.combine: groupby = "nodebase"
+else: groupby = "nodepath"
+
+###
+## Plotting time! 'keys' variable keeps track of what we're plotting, and will be used to build two hash tables
+##  (for matplotlib figures and axes).
+##  'ts' means time series; this will create a plot of run walltime vs. date/time for the selectes ecFlow tasks.
+##  'hist' means histogram; this will create a histogram of run walltimes for the selected ecFlow tasks.
+keys = ["ts"]
+if args.dists: keys += ["hist","violin"]
+figs = {} ; axes = {}
+models = df[groupby].unique()
+if args.figsize is not None: figsizes = list(args.figsize.split(":"))
+for key in keys:
+ ind = keys.index(key)
+ figsize = figsizes[min((ind,len(figsizes)-1))]
+ fs = tuple([float(i) for i in figsize.split(",")])
+ fig_kw={"figsize":fs}
+ figs[key], axes[key] = plt.subplots(**fig_kw)
+try:
+ cols = plt.rcParams['axes.prop_cycle'].by_key()['color']
+ custom_cycler = cycler(color=cols*3) + cycler(linestyle=itertools.chain(*[[ls]*len(cols) for ls in ["-",":","-."]]))
+ axes["ts"].set_prop_cycle(custom_cycler)
+except: pass
+N = len(models)
+
+for model in models:
+ dft = df[df[groupby]==model]
+ if args.maxtime is not None: w = np.logical_and((dft[yvar]>args.mintime),(dft[yvar]<args.maxtime))
+ else: w = (dft[yvar]>args.mintime)
+ dft = dft[w]
+ drawstyle = ("steps-mid" if args.plotsteps else "default")
+ if args.binfreq is None:
+  if args.maxtime is not None: w = np.logical_and((dft[yvar]>args.mintime),(dft[yvar]<args.maxtime))
+  else: w = (dft[yvar]>args.mintime)
+  ts = axes["ts"].plot(dft[xvar][w],dft[yvar][w],zorder=2,drawstyle=drawstyle)
+ else:
+  gdft = dft.groupby(pd.Grouper(key='activedatetime', freq=args.binfreq, label="left"))
+  gdft_right = dft.groupby(pd.Grouper(key='activedatetime', freq=args.binfreq, label="right"))
+  if args.avgtype=="mean": binnedavgs = gdft.mean() ; binneddisps = gdft.std()
+  elif args.avgtype=="median": binnedavgs = gdft.median() ; binneddisps = madfac*gdft.mad()
+  bindates_float = np.mean((binnedavgs.index.values.astype(np.int64),gdft_right.mean().index.values.astype(np.int64)),axis=0)
+  bindates = pd.to_datetime(bindates_float)
+  w = np.isfinite(binnedavgs[yvar])
+  ts = axes["ts"].errorbar(bindates[w], binnedavgs[yvar][w], yerr=binneddisps[yvar][w], zorder=2, label=None, drawstyle=drawstyle)
+ color = ts[0].get_color()
+ if args.stats:
+  if args.avgtype=="mean": theavg = np.mean(dft[yvar]) ; thedisp = np.std(dft[yvar])
+  elif args.avgtype=="median": theavg = np.median(dft[yvar]) ; thedisp = madfac*mad(dft[yvar])
+  axes["ts"].hlines(theavg,dft[xvar].iloc[0],dft[xvar].iloc[-1],linestyles="--",color=color,alpha=0.8,zorder=3)
+  axes["ts"].axhspan(theavg-thedisp, theavg+thedisp, alpha=0.3, facecolor=color, edgecolor=None, zorder=1)
+  label = "%s\n %s (%s): %.1f (%.1f) (N=%s)"%(model,args.avgtype,u"\u03C3" if args.avgtype=="mean" else "MAD",theavg,thedisp,len(dft))
+ else: label = (None if N==1 else model)
+ if args.shortenpaths: label = re.sub("(/[^/]*/).*(/[^/]*)","\\1...\\2",label)
+ ts[0].set_label(label)
+ if args.dists:
+  try:
+   binwidth = 3.0*np.median([(np.percentile(dft[yvar],p+20)-np.percentile(dft[yvar],p))/len(dft[yvar])**(1.0/3.0) for p in range(0,81,10)])
+   nbins = int((np.max(dft[yvar])-np.min(dft[yvar]))/binwidth)
+  except: nbins = 1
+  h = axes["hist"].hist(dft[yvar], nbins, label=label, alpha=0.8, color=color,zorder=2)
+  if args.stats:
+   axes["hist"].vlines(theavg,0.0,np.max(h[0]),linestyles="--",alpha=0.85,color=color,zorder=3)
+  axes["hist"].set_xlabel(nicename[yvar])
+  axes["hist"].set_ylabel("Number of runs")
+if args.dists:
+ bx = sns.boxplot(x=groupby,y="walltime_min",hue=groupby,data=df,ax=axes["violin"],whis="range")
+ z = 2
+ plt.setp(bx.artists, fill=None)
+ plt.setp(bx.artists, zorder=z)
+ plt.setp(bx.lines, zorder=z)
+ vp = sns.violinplot(x=groupby,y="walltime_min",hue=groupby,data=df,ax=axes["violin"],inner=None)
+ axes["violin"].set_xlabel("")
+ axes["violin"].set_ylabel(nicename[yvar])
+ axes["violin"].set_xticks([])
+ if key in["violin"]: axes[key].get_legend().remove()
+deltadays = args.daysagostart-args.daysagostop
+if deltadays>90: hrs = [0]
+elif deltadays>30: hrs = [0,12]
+else: hrs = [0,6,12,18]
+axes["ts"].xaxis.set_minor_locator(mdates.HourLocator(hrs))
+axes["ts"].xaxis.set_tick_params(rotation=40)
+axes["ts"].set_xlabel(nicename[xvar])
+axes["ts"].set_ylabel(nicename[yvar])
+if args.gotozero: axes["ts"].set_ylim(0,axes["ts"].get_ylim()[1])
+axes["ts"].tick_params(which="both", bottom=True)
+for key in keys:
+ if N>1 or args.stats:
+  if key=="violin":
+   hl = axes["hist"].get_legend_handles_labels()
+   axes["violin"].legend(hl[0],hl[1])
+  else: l = axes[key].legend()
+ else: axes[key].set_title(models[0].replace(":","\n"),fontsize=args.fontsize+1)
+
+if args.plottype=="interactive":
+ for i in range(3):
+  for key in keys:
+   try: figs[key].tight_layout()
+   except: pass
+ plt.show()
+else:
+ tt = str(time.time())
+ for key in figs.keys():
+  if args.outfilebase is None:
+   outname = "_".join(df["nodebase"].unique())+"_"+key+"."+tt+"."+args.plottype
+   if len(outname)>254: outname = ("_".join(args.taskpaths))[:200]+"."+tt+"."+args.plottype
+  else: outname = args.outfilebase+"_"+key+"."+args.plottype
+  outpath = os.path.abspath(args.outdir+"/"+outname)
+  os.makedirs(os.path.dirname(outpath),exist_ok=True)
+  try: figs[key].tight_layout()
+  except: pass
+  figs[key].savefig(outpath)
+  sys.stdout.write("%s: Saved '%s'\n"%(scriptname,outpath))
+  sys.stdout.flush()
